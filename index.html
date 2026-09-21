@@ -1,0 +1,482 @@
+<!DOCTYPE html>
+<html lang="th">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+  <title>ระบบตรวจข้อสอบออนไลน์ OMR Scanner (4 ตัวเลือก)</title>
+  
+  <!-- Tailwind CSS CDN -->
+  <script src="https://cdn.tailwindcss.com"></script>
+  <script>
+    tailwind.config = {
+      theme: {
+        extend: {
+          colors: {
+            brand: {
+              50: '#eef2ff',
+              100: '#e0e7ff',
+              500: '#6366f1',
+              600: '#4f46e5',
+              700: '#4338ca',
+            }
+          }
+        }
+      }
+    }
+  </script>
+
+  <!-- Google Fonts: Prompt & Kanit -->
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Kanit:wght@400;500;600&family=Prompt:wght@300;400;500;600;700&display=swap" rel="stylesheet">
+  
+  <!-- Custom Stylesheet -->
+  <link rel="stylesheet" href="css/style.css">
+
+  <!-- Firebase v10 Compat SDK -->
+  <script src="https://www.gstatic.com/firebasejs/10.8.0/firebase-app-compat.js"></script>
+  <script src="https://www.gstatic.com/firebasejs/10.8.0/firebase-firestore-compat.js"></script>
+
+  <!-- OpenCV.js for Computer Vision & Homography -->
+  <script async src="https://docs.opencv.org/4.8.0/opencv.js" onload="window.dispatchEvent(new Event('opencv-ready'))"></script>
+</head>
+<body class="bg-slate-100 text-slate-800 min-h-screen flex flex-col antialiased">
+
+  <!-- 1. Header Navigation Bar -->
+  <header class="bg-white border-b border-slate-200 sticky top-0 z-40 shadow-sm">
+    <div class="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">
+      <div class="flex items-center justify-between h-16">
+        <!-- Logo & Title -->
+        <div class="flex items-center space-x-3">
+          <div class="w-10 h-10 rounded-xl bg-gradient-to-tr from-indigo-600 to-violet-500 flex items-center justify-center text-white shadow-md shadow-indigo-200">
+            <svg class="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+              <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 5H7a2 2 0 00-2 2v12a2 2 0 002 2h10a2 2 0 002-2V7a2 2 0 00-2-2h-2M9 5a2 2 0 002 2h2a2 2 0 002-2M9 5a2 2 0 012-2h2a2 2 0 012 2m-6 9l2 2 4-4" />
+            </svg>
+          </div>
+          <div>
+            <h1 class="text-base sm:text-lg font-bold text-slate-900 leading-tight">OMR Exam Scanner</h1>
+            <p class="text-xs text-slate-500">ระบบตรวจข้อสอบออนไลน์ 4 ตัวเลือก พร้อมจุดมาร์ค</p>
+          </div>
+        </div>
+
+        <!-- Active Subject Quick Switcher & Status -->
+        <div class="flex items-center space-x-3">
+          <div class="hidden md:flex items-center space-x-2 bg-slate-50 border border-slate-200 rounded-lg px-2.5 py-1.5">
+            <span class="text-xs text-slate-500 font-medium">กำลังตรวจ:</span>
+            <select id="globalActiveExamSelect" class="bg-transparent text-xs font-semibold text-slate-800 focus:outline-none cursor-pointer">
+              <option value="">กำลังโหลดวิชา...</option>
+            </select>
+          </div>
+          <div id="firebaseStatusBadge" class="hidden sm:inline-flex items-center px-2.5 py-1 rounded-full text-xs font-medium bg-amber-100 text-amber-800">
+            <span class="w-2 h-2 mr-1.5 bg-amber-500 rounded-full"></span> Local Storage
+          </div>
+        </div>
+      </div>
+
+      <!-- Navigation Tabs -->
+      <nav class="flex space-x-2 sm:space-x-8 border-t border-slate-100 overflow-x-auto py-1">
+        <button data-tab="sheet" class="nav-tab-btn py-2.5 px-3 text-sm font-semibold border-b-2 border-indigo-600 text-indigo-600 whitespace-nowrap flex items-center space-x-2">
+          <span>📄</span>
+          <span>สร้างกระดาษคำตอบ</span>
+        </button>
+        <button data-tab="key" class="nav-tab-btn py-2.5 px-3 text-sm font-medium border-b-2 border-transparent text-slate-500 hover:text-slate-700 whitespace-nowrap flex items-center space-x-2">
+          <span>🔑</span>
+          <span>จัดการเฉลยวิชา</span>
+        </button>
+        <button data-tab="scan" class="nav-tab-btn py-2.5 px-3 text-sm font-medium border-b-2 border-transparent text-slate-500 hover:text-slate-700 whitespace-nowrap flex items-center space-x-2">
+          <span>📷</span>
+          <span>ตรวจข้อสอบด้วยกล้อง</span>
+        </button>
+        <button data-tab="settings" class="nav-tab-btn py-2.5 px-3 text-sm font-medium border-b-2 border-transparent text-slate-500 hover:text-slate-700 whitespace-nowrap flex items-center space-x-2">
+          <span>⚙️</span>
+          <span>ตั้งค่า Firebase</span>
+        </button>
+      </nav>
+    </div>
+  </header>
+
+  <!-- 2. Main Content Area -->
+  <main class="flex-1 max-w-7xl w-full mx-auto p-4 sm:p-6 lg:p-8">
+
+    <!-- ============================================== -->
+    <!-- TAB 1: สร้างกระดาษคำตอบ (Answer Sheet Generator) -->
+    <!-- ============================================== -->
+    <section id="tab-sheet" class="tab-pane">
+      <div class="grid grid-cols-1 lg:grid-cols-12 gap-6">
+        
+        <!-- ซ้าย: ฟอร์มกำหนดค่ากระดาษคำตอบ -->
+        <div class="lg:col-span-4 space-y-6">
+          <div class="bg-white rounded-2xl p-5 shadow-sm border border-slate-200">
+            <div class="flex items-center justify-between pb-3 border-b border-slate-100 mb-4">
+              <h2 class="text-base font-bold text-slate-900 flex items-center space-x-2">
+                <span>⚙️ ตั้งค่ากระดาษคำตอบ</span>
+              </h2>
+              <button id="btnSyncWithExam" type="button" class="text-xs text-indigo-600 hover:text-indigo-700 font-medium">
+                ดึงจากวิชาที่เลือก
+              </button>
+            </div>
+
+            <div class="space-y-4 text-sm">
+              <!-- จำนวนข้อ -->
+              <div>
+                <label class="block text-xs font-semibold text-slate-600 mb-1">จำนวนข้อสอบ</label>
+                <select id="sheetQuestions" class="w-full bg-slate-50 border border-slate-300 rounded-xl px-3 py-2 text-slate-800 focus:ring-2 focus:ring-indigo-500 focus:outline-none">
+                  <option value="10" selected>10 ข้อ</option>
+                  <option value="20">20 ข้อ</option>
+                  <option value="30">30 ข้อ</option>
+                  <option value="40">40 ข้อ</option>
+                  <option value="50">50 ข้อ</option>
+                  <option value="60">60 ข้อ</option>
+                  <option value="80">80 ข้อ</option>
+                  <option value="100">100 ข้อ</option>
+                </select>
+              </div>
+
+              <!-- การจัดคอลัมน์ -->
+              <div>
+                <label class="block text-xs font-semibold text-slate-600 mb-1">การจัดคอลัมน์</label>
+                <select id="sheetColumns" class="w-full bg-slate-50 border border-slate-300 rounded-xl px-3 py-2 text-slate-800 focus:ring-2 focus:ring-indigo-500 focus:outline-none">
+                  <option value="auto" selected>อัตโนมัติ (เหมาะสมที่สุด)</option>
+                  <option value="1">1 คอลัมน์ (ทรงยาว/แทรกด้านข้าง)</option>
+                  <option value="2">2 คอลัมน์</option>
+                  <option value="3">3 คอลัมน์</option>
+                  <option value="4">4 คอลัมน์</option>
+                </select>
+              </div>
+
+              <!-- ชนิดตัวเลือก -->
+              <div>
+                <label class="block text-xs font-semibold text-slate-600 mb-1">รูปแบบตัวเลือก (4 ตัวเลือก)</label>
+                <select id="sheetChoiceType" class="w-full bg-slate-50 border border-slate-300 rounded-xl px-3 py-2 text-slate-800 focus:ring-2 focus:ring-indigo-500 focus:outline-none">
+                  <option value="thai" selected>ก, ข, ค, ง</option>
+                  <option value="num">1, 2, 3, 4</option>
+                  <option value="eng">A, B, C, D</option>
+                </select>
+              </div>
+
+              <div class="p-3 bg-emerald-50 rounded-xl border border-emerald-100 text-xs text-emerald-800">
+                ✨ <strong>แบบกระชับ (Pure Grid):</strong> ตัดส่วนหัวออกทั้งหมด จุดมาร์ค 4 มุมชิดตาราง ไม่มีพื้นที่ว่างเหลือทิ้ง และมีแถบระบุจำนวนข้อสอบอัตโนมัติ
+              </div>
+            </div>
+
+            <!-- ปุ่มดำเนินการ -->
+            <div class="mt-6 pt-4 border-t border-slate-100 space-y-2.5">
+              <button id="btnCopySheet" type="button" class="w-full py-3 px-4 rounded-xl bg-indigo-600 hover:bg-indigo-700 text-white font-medium text-sm flex items-center justify-center space-x-2 shadow-md shadow-indigo-100 transition-all active:scale-95">
+                <span>📋 คัดลอกภาพไปใส่ Word (Ctrl+V)</span>
+              </button>
+
+              <div class="grid grid-cols-2 gap-2">
+                <button id="btnDownloadSheet" type="button" class="py-2.5 px-3 rounded-xl bg-white border border-slate-300 hover:bg-slate-50 text-slate-700 font-medium text-xs flex items-center justify-center space-x-1.5 transition-all">
+                  <span>💾 ดาวน์โหลด PNG</span>
+                </button>
+                <button id="btnPrintSheet" type="button" class="py-2.5 px-3 rounded-xl bg-white border border-slate-300 hover:bg-slate-50 text-slate-700 font-medium text-xs flex items-center justify-center space-x-1.5 transition-all">
+                  <span>🖨️ พิมพ์ / PDF A4</span>
+                </button>
+              </div>
+            </div>
+          </div>
+
+          <!-- คำแนะนำการนำไปใส่ Word และจุดมาร์ค -->
+          <div class="bg-indigo-50/70 border border-indigo-100 rounded-2xl p-4 text-xs text-indigo-900 space-y-2">
+            <h4 class="font-bold flex items-center space-x-1.5 text-indigo-800">
+              <span>💡 คำแนะนำการใช้งานกับ Microsoft Word</span>
+            </h4>
+            <p>1. กดปุ่ม <strong>"คัดลอกภาพไปใส่ Word"</strong> แล้วเปิดโปรแกรม Word จากนั้นกด <strong>Ctrl + V</strong> ได้ทันที</p>
+            <p>2. ตารางจะมี <strong>จุดมาร์คสี่เหลี่ยมสีดำ 4 มุม</strong> อัตโนมัติ เพื่อให้ระบบกล้องตรวจพิกัดได้แม่นยำ</p>
+            <p>3. ห้ามตัดหรือครอบขอบ (Crop) บังจุดมาร์ค 4 มุม เพื่อให้สแกนได้เร็วและตรงตำแหน่ง</p>
+          </div>
+        </div>
+
+        <!-- ขวา: พรีวิวกระดาษคำตอบแบบ Live Canvas -->
+        <div class="lg:col-span-8">
+          <div class="bg-white rounded-2xl p-4 sm:p-6 shadow-sm border border-slate-200 flex flex-col items-center">
+            <div class="w-full flex items-center justify-between pb-3 mb-3 border-b border-slate-100">
+              <span class="text-xs font-semibold uppercase tracking-wider text-slate-500">ตัวอย่างกระดาษคำตอบความละเอียดสูง (Print Ready)</span>
+              <span class="text-xs text-emerald-600 bg-emerald-50 px-2 py-0.5 rounded-full font-medium">มีจุดมาร์ค 4 มุมสำหรับกล้อง</span>
+            </div>
+            
+            <div class="w-full flex justify-center bg-slate-50 p-2 sm:p-4 rounded-xl border border-slate-200 overflow-auto max-h-[800px]">
+              <canvas id="sheetPreviewCanvas" class="max-w-full h-auto shadow-md rounded bg-white" style="max-height: 750px;"></canvas>
+            </div>
+          </div>
+        </div>
+
+      </div>
+    </section>
+
+    <!-- ============================================== -->
+    <!-- TAB 2: จัดการเฉลยวิชา (Answer Key Manager) -->
+    <!-- ============================================== -->
+    <section id="tab-key" class="tab-pane hidden">
+      <div class="grid grid-cols-1 lg:grid-cols-12 gap-6">
+        
+        <!-- ซ้าย: รายการชุดเฉลยที่มีทั้งหมด -->
+        <div class="lg:col-span-4 space-y-4">
+          <div class="bg-white rounded-2xl p-4 shadow-sm border border-slate-200">
+            <div class="flex items-center justify-between pb-3 border-b border-slate-100 mb-3">
+              <h3 class="font-bold text-slate-900 text-sm">📚 ชุดเฉลยวิชาทั้งหมด</h3>
+              <button id="btnAddNewExam" type="button" class="text-xs bg-indigo-600 hover:bg-indigo-700 text-white font-medium px-3 py-1.5 rounded-lg flex items-center space-x-1 shadow-sm transition-all">
+                <span>+ เพิ่มวิชาใหม่</span>
+              </button>
+            </div>
+            <!-- รายชื่อวิชา -->
+            <div id="examsListContainer" class="space-y-2 max-h-[600px] overflow-y-auto pr-1">
+              <!-- Rendered via JS -->
+            </div>
+          </div>
+
+          <div class="bg-slate-50 border border-slate-200 rounded-xl p-3 text-xs text-slate-500">
+            📌 สามารถสร้างเฉลยไว้ล่วงหน้าได้หลายวิชา หรือหลายห้องเรียน และสลับเลือกตรวจได้ทันที
+          </div>
+        </div>
+
+        <!-- ขวา: ตัวแก้ไขเฉลย (Key Editor Form) -->
+        <div class="lg:col-span-8">
+          <div class="bg-white rounded-2xl p-5 sm:p-6 shadow-sm border border-slate-200" id="keyEditorForm">
+            <!-- Header ฟอร์มแก้ไข -->
+            <div class="flex flex-wrap items-center justify-between gap-3 pb-4 border-b border-slate-100">
+              <div>
+                <h3 class="font-bold text-slate-900 text-lg">✏️ แก้ไขเฉลยคำตอบ</h3>
+                <p class="text-xs text-slate-500">คลิกที่วงกลม ก ข ค ง เพื่อเลือกคำตอบที่ถูกต้องของแต่ละข้อ</p>
+              </div>
+              <div class="flex items-center space-x-2">
+                <button id="btnDeleteExam" type="button" class="text-xs text-rose-600 hover:text-rose-700 font-medium px-3 py-2 rounded-lg border border-rose-200 hover:bg-rose-50 transition-all">
+                  ลบวิชานี้
+                </button>
+                <button id="btnSaveKey" type="button" class="text-sm bg-indigo-600 hover:bg-indigo-700 text-white font-semibold px-4 py-2 rounded-xl shadow-md shadow-indigo-100 transition-all">
+                  💾 บันทึกชุดเฉลย
+                </button>
+              </div>
+            </div>
+
+            <!-- ฟิลด์ข้อมูลวิชา -->
+            <div class="grid grid-cols-1 sm:grid-cols-4 gap-3 my-4">
+              <div>
+                <label class="block text-xs font-semibold text-slate-600 mb-1">ชื่อวิชา</label>
+                <input id="keyExamSubject" type="text" class="w-full bg-slate-50 border border-slate-300 rounded-xl px-3 py-2 text-sm text-slate-800 focus:ring-2 focus:ring-indigo-500 focus:outline-none">
+              </div>
+              <div>
+                <label class="block text-xs font-semibold text-slate-600 mb-1">ห้อง / ชั้นเรียน</label>
+                <input id="keyExamRoom" type="text" class="w-full bg-slate-50 border border-slate-300 rounded-xl px-3 py-2 text-sm text-slate-800 focus:ring-2 focus:ring-indigo-500 focus:outline-none">
+              </div>
+              <div>
+                <label class="block text-xs font-semibold text-slate-600 mb-1">จำนวนข้อ</label>
+                <input id="keyExamQuestions" type="number" min="5" max="100" class="w-full bg-slate-50 border border-slate-300 rounded-xl px-3 py-2 text-sm text-slate-800 focus:ring-2 focus:ring-indigo-500 focus:outline-none">
+              </div>
+              <div>
+                <label class="block text-xs font-semibold text-slate-600 mb-1">รูปแบบตัวเลือก</label>
+                <select id="keyExamChoiceType" class="w-full bg-slate-50 border border-slate-300 rounded-xl px-3 py-2 text-sm text-slate-800 focus:ring-2 focus:ring-indigo-500 focus:outline-none">
+                  <option value="thai">ก, ข, ค, ง</option>
+                  <option value="num">1, 2, 3, 4</option>
+                  <option value="eng">A, B, C, D</option>
+                </select>
+              </div>
+            </div>
+
+            <!-- ทางลัดการเลือกคำตอบ -->
+            <div class="flex items-center justify-between bg-slate-50 p-2.5 rounded-xl border border-slate-200 mb-4 text-xs">
+              <span class="text-slate-600 font-medium">เครื่องมือลัด:</span>
+              <div class="flex space-x-2">
+                <button id="btnRandomKey" type="button" class="text-indigo-600 hover:text-indigo-800 px-2 py-1 rounded bg-white border border-slate-200">
+                  🎲 สุ่มเฉลย (ทดสอบ)
+                </button>
+                <button id="btnClearKey" type="button" class="text-slate-600 hover:text-slate-800 px-2 py-1 rounded bg-white border border-slate-200">
+                  ล้างคำตอบ
+                </button>
+              </div>
+            </div>
+
+            <!-- กริดเฉลยรายข้อ (Interactive Key Bubbles) -->
+            <div id="keyBubblesGrid" class="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 gap-3 max-h-[500px] overflow-y-auto pr-1">
+              <!-- Rendered via JS -->
+            </div>
+          </div>
+        </div>
+
+      </div>
+    </section>
+
+    <!-- ============================================== -->
+    <!-- TAB 3: กล้องตรวจข้อสอบ (Camera Scanner) -->
+    <!-- ============================================== -->
+    <section id="tab-scan" class="tab-pane hidden">
+      <div class="max-w-4xl mx-auto space-y-4">
+        
+        <!-- แถบระบุวิชาที่กำลังตรวจ -->
+        <div class="bg-white rounded-2xl p-4 shadow-sm border border-slate-200 flex flex-wrap items-center justify-between gap-3">
+          <div class="flex items-center space-x-3">
+            <div class="w-3 h-3 rounded-full bg-emerald-500 animate-ping"></div>
+            <div>
+              <span class="text-xs text-slate-500 block">กำลังตรวจข้อสอบวิชา:</span>
+              <h3 id="scanActiveExamBadge" class="text-base font-bold text-slate-900">ยังไม่ได้เลือกวิชา</h3>
+            </div>
+          </div>
+          <div class="flex items-center space-x-2">
+            <button id="btnSimulateScan" type="button" class="text-xs bg-violet-50 hover:bg-violet-100 text-violet-700 font-semibold px-3 py-2 rounded-xl border border-violet-200 flex items-center space-x-1.5 transition-all">
+              <span>🧪 ทดสอบตรวจกระดาษจำลอง</span>
+            </button>
+            <label class="text-xs bg-slate-100 hover:bg-slate-200 text-slate-700 font-medium px-3 py-2 rounded-xl border border-slate-300 cursor-pointer flex items-center space-x-1.5 transition-all">
+              <span>📁 อัปโหลดภาพ</span>
+              <input type="file" id="fileUploadInput" accept="image/*" class="hidden">
+            </label>
+          </div>
+        </div>
+
+        <!-- หน้าจอกล้องสแกน (Viewfinder & Reticle) -->
+        <div class="relative bg-slate-900 rounded-2xl overflow-hidden shadow-xl aspect-[4/3] sm:aspect-[16/10] max-h-[640px] flex items-center justify-center">
+          
+          <video id="cameraVideo" autoplay playsinline muted class="w-full h-full object-cover"></video>
+          <canvas id="cameraOverlay" class="absolute inset-0 w-full h-full pointer-events-none"></canvas>
+
+          <!-- เส้นไกด์เล็งมุมทั้ง 4 -->
+          <div class="scan-guide-box">
+            <div class="scan-guide-corner tl"></div>
+            <div class="scan-guide-corner tr"></div>
+            <div class="scan-guide-corner bl"></div>
+            <div class="scan-guide-corner br"></div>
+          </div>
+
+          <!-- สถานะตรวจจับมุม -->
+          <div class="absolute top-4 left-1/2 transform -translate-x-1/2 bg-black/60 backdrop-blur-md px-4 py-1.5 rounded-full text-xs text-white shadow-lg pointer-events-none z-10">
+            <span id="scanStatusText">กล้องปิดอยู่ กดปุ่มเปิดกล้องเพื่อเริ่มสแกน</span>
+          </div>
+
+          <!-- Mini Score Flash Badge (มุมกล้อง ไม่บังช่องเล็งกระดาษ) -->
+          <div id="cameraScoreBadge" class="hidden absolute top-4 right-4 bg-emerald-600/90 backdrop-blur-md text-white px-3.5 py-1.5 rounded-xl shadow-lg z-10 flex items-center space-x-1.5 transition-all">
+            <span class="text-xs font-semibold">ตรวจแล้ว:</span>
+            <span id="miniScoreValue" class="text-base font-black">18/20</span>
+          </div>
+
+        </div>
+
+        <!-- กล่องแสดงผลคะแนนแยกออกมาด้านล่าง (ไม่บังกล้อง 100% บอกแค่ถูก/ผิด ไม่บอกเฉลย) -->
+        <div id="scoreResultCard" class="hidden bg-white rounded-2xl p-4 sm:p-5 shadow-sm border border-slate-200 transition-all">
+          <div class="flex flex-wrap items-center justify-between gap-3">
+            <!-- ฝั่งซ้าย: คะแนนรวมตัวใหญ่ + เปอร์เซ็นต์ -->
+            <div class="flex items-center space-x-3">
+              <div class="flex items-baseline space-x-1.5">
+                <span class="text-xs font-semibold uppercase text-slate-400">คะแนน</span>
+                <span id="scoreBigNumber" class="text-4xl sm:text-5xl font-black text-indigo-600 tracking-tight">0</span>
+                <span id="scoreTotalQuestions" class="text-xl sm:text-2xl font-bold text-slate-400">/ 0</span>
+              </div>
+              <span id="scorePercentBadge" class="px-2.5 py-1 rounded-full text-xs font-bold bg-emerald-100 text-emerald-800">0%</span>
+            </div>
+
+            <!-- ฝั่งขวา: นับจำนวน ถูก / ผิด / ว่าง -->
+            <div class="flex items-center space-x-2">
+              <span class="px-3 py-1.5 bg-emerald-50 text-emerald-700 border border-emerald-200 rounded-xl text-xs font-semibold flex items-center space-x-1">
+                <span>✓ ถูก</span>
+                <strong id="scoreCorrectCount" class="text-sm font-bold ml-1">0</strong>
+                <span>ข้อ</span>
+              </span>
+              <span class="px-3 py-1.5 bg-rose-50 text-rose-700 border border-rose-200 rounded-xl text-xs font-semibold flex items-center space-x-1">
+                <span>✗ ผิด</span>
+                <strong id="scoreWrongCount" class="text-sm font-bold ml-1">0</strong>
+                <span>ข้อ</span>
+              </span>
+              <span id="scoreBlankBadge" class="hidden px-3 py-1.5 bg-amber-50 text-amber-700 border border-amber-200 rounded-xl text-xs font-semibold items-center space-x-1">
+                <span>ว่าง</span>
+                <strong id="scoreBlankCount" class="text-sm font-bold ml-1">0</strong>
+                <span>ข้อ</span>
+              </span>
+            </div>
+          </div>
+
+          <!-- แถวระบุข้อที่ทำผิด (เฉพาะเลขข้อ ไม่บอกเฉลยคำตอบ) -->
+          <div class="mt-3 pt-3 border-t border-slate-100 flex flex-wrap items-center justify-between gap-2 text-xs">
+            <div id="scoreWrongQuestionsSection" class="flex items-center space-x-1.5 flex-wrap">
+              <span class="text-slate-500 font-medium">ข้อที่ผิด:</span>
+              <span id="scoreWrongQuestionsList" class="font-bold text-rose-600">-</span>
+            </div>
+            <div class="flex items-center space-x-2 text-[11px] text-slate-400">
+              <span class="inline-flex items-center text-emerald-600 font-medium">
+                <span class="w-2 h-2 rounded-full bg-emerald-500 mr-1.5 animate-pulse"></span>
+                ส่องแผ่นต่อไปเพื่อตรวจได้ทันที
+              </span>
+            </div>
+          </div>
+        </div>
+
+        <!-- ปุ่มควบคุมกล้อง -->
+        <div class="flex items-center justify-center space-x-3 pt-2">
+          <button id="btnToggleCamera" type="button" class="py-3 px-6 rounded-2xl bg-indigo-600 hover:bg-indigo-700 text-white font-semibold text-sm flex items-center space-x-2 shadow-lg shadow-indigo-200 transition-all active:scale-95">
+            <span>📷 เปิดกล้องตรวจ</span>
+          </button>
+          <button id="btnSwitchCamera" type="button" class="py-3 px-4 rounded-2xl bg-white border border-slate-300 hover:bg-slate-50 text-slate-700 font-medium text-sm flex items-center space-x-1.5 shadow-sm transition-all">
+            <span>🔄 สลับกล้องหน้า/หลัง</span>
+          </button>
+        </div>
+
+        <!-- คำแนะนำการส่องตรวจ -->
+        <div class="bg-white rounded-xl p-4 text-xs text-slate-500 border border-slate-200 space-y-1">
+          <p class="font-semibold text-slate-700">📸 เคล็ดลับการตรวจให้รวดเร็วและแม่นยำ:</p>
+          <p>• ส่องกล้องให้เห็น <strong>จุดมาร์คสี่เหลี่ยมดำครบทั้ง 4 มุม</strong> ให้อยู่ในกรอบ</p>
+          <p>• ถือกล้องให้นิ่งในบริเวณที่มีแสงสว่างเพียงพอ หลีกเลี่ยงเงาพาดทับกระดาษ</p>
+          <p>• ระบบจะคำนวณและแสดงคะแนนทันทีเมื่อพบจุดมาร์ค พร้อมส่งเสียง Beep แจ้งเตือน</p>
+        </div>
+
+      </div>
+    </section>
+
+    <!-- ============================================== -->
+    <!-- TAB 4: ตั้งค่า Firebase (Firebase Settings) -->
+    <!-- ============================================== -->
+    <section id="tab-settings" class="tab-pane hidden">
+      <div class="max-w-2xl mx-auto bg-white rounded-2xl p-6 shadow-sm border border-slate-200 space-y-5">
+        <div>
+          <h3 class="text-lg font-bold text-slate-900">🔥 ตั้งค่าการเชื่อมต่อ Firebase</h3>
+          <p class="text-xs text-slate-500 mt-1">
+            นำค่า Firebase Config จาก Firebase Console (Project Settings) มาวางที่นี่ เพื่อบันทึกเฉลยข้อสอบขึ้นระบบ Cloud ออนไลน์
+          </p>
+        </div>
+
+        <div class="space-y-3 text-sm">
+          <div>
+            <label class="block text-xs font-semibold text-slate-600 mb-1">API Key</label>
+            <input id="fbApiKey" type="text" placeholder="AIzaSy..." class="w-full bg-slate-50 border border-slate-300 rounded-xl px-3 py-2 text-slate-800 font-mono text-xs focus:ring-2 focus:ring-indigo-500 focus:outline-none">
+          </div>
+          <div>
+            <label class="block text-xs font-semibold text-slate-600 mb-1">Project ID</label>
+            <input id="fbProjectId" type="text" placeholder="my-exam-app" class="w-full bg-slate-50 border border-slate-300 rounded-xl px-3 py-2 text-slate-800 font-mono text-xs focus:ring-2 focus:ring-indigo-500 focus:outline-none">
+          </div>
+          <div>
+            <label class="block text-xs font-semibold text-slate-600 mb-1">Auth Domain (ทางเลือก)</label>
+            <input id="fbAuthDomain" type="text" placeholder="my-exam-app.firebaseapp.com" class="w-full bg-slate-50 border border-slate-300 rounded-xl px-3 py-2 text-slate-800 font-mono text-xs focus:ring-2 focus:ring-indigo-500 focus:outline-none">
+          </div>
+          <div>
+            <label class="block text-xs font-semibold text-slate-600 mb-1">Storage Bucket (ทางเลือก)</label>
+            <input id="fbStorageBucket" type="text" placeholder="my-exam-app.appspot.com" class="w-full bg-slate-50 border border-slate-300 rounded-xl px-3 py-2 text-slate-800 font-mono text-xs focus:ring-2 focus:ring-indigo-500 focus:outline-none">
+          </div>
+          <div>
+            <label class="block text-xs font-semibold text-slate-600 mb-1">App ID</label>
+            <input id="fbAppId" type="text" placeholder="1:123456789:web:abcdef" class="w-full bg-slate-50 border border-slate-300 rounded-xl px-3 py-2 text-slate-800 font-mono text-xs focus:ring-2 focus:ring-indigo-500 focus:outline-none">
+          </div>
+        </div>
+
+        <div class="pt-4 border-t border-slate-100 flex items-center justify-between">
+          <button id="btnResetFirebaseConfig" type="button" class="text-xs text-rose-600 hover:text-rose-700 font-medium">
+            รีเซ็ตเป็นโหมด Local Storage
+          </button>
+          <button id="btnSaveFirebaseConfig" type="button" class="bg-indigo-600 hover:bg-indigo-700 text-white font-semibold text-sm px-5 py-2.5 rounded-xl shadow-md shadow-indigo-100 transition-all">
+            บันทึกการตั้งค่า Firebase
+          </button>
+        </div>
+
+        <div class="bg-amber-50 border border-amber-200 rounded-xl p-3 text-xs text-amber-900">
+          💡 หากยังไม่ได้ใส่ค่า Firebase ระบบจะทำงานในโหมด <strong>Local Storage</strong> โดยอัตโนมัติ ซึ่งสามารถบันทึกเฉลยได้ในเครื่องตามปกติ
+        </div>
+      </div>
+    </section>
+
+  </main>
+
+  <!-- 3. Toast Notifications -->
+  <div id="toastNotification" class="hidden"></div>
+
+  <!-- 4. Scripts -->
+  <script src="js/firebase-config.js"></script>
+  <script src="js/sheet-generator.js"></script>
+  <script src="js/omr-engine.js"></script>
+  <script src="js/app.js"></script>
+</body>
+</html>
