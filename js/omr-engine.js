@@ -53,18 +53,37 @@ class OMREngine {
     if (!corners || corners.length !== 4) {
       return {
         success: false,
-        error: 'ยังไม่พบจุดมาร์คทั้ง 4 มุม กรุณาส่องให้เห็นจุดมาร์คสี่เหลี่ยมดำ 4 มุมครบถ้วน',
+        error: 'ยังไม่พบกระดาษคำตอบ กรุณาส่องให้เห็นจุดมาร์คสี่เหลี่ยมดำ 4 มุมครบถ้วน',
         foundCornersCount: corners ? corners.length : 0
       };
     }
 
-    // 2. ปรับมุมมองภาพ (Perspective Warp) ให้ระนาบตรง
+    // 2. ตรวจสอบความสมบูรณ์ทางเรขาคณิต (Convexity, Area, Aspect Ratio)
+    if (!this.isValidQuadGeometry(corners, sw, sh)) {
+      return {
+        success: false,
+        error: 'มุมมองกระดาษเอียงเกินไปหรือไม่ใช่รูปทรงกระดาษคำตอบ',
+        corners
+      };
+    }
+
+    // 3. ปรับมุมมองภาพ (Perspective Warp) ให้ระนาบตรง
     const warpedCanvas = this.warpPerspective(srcCanvas, corners);
     if (!warpedCanvas) {
       return { success: false, error: 'ไม่สามารถปรับระนาบภาพได้' };
     }
 
-    // 3. วิเคราะห์ความเข้มของวงกลมแต่ละข้อ (Bubble Density Analysis)
+    // 4. ตรวจสอบยืนยันจุดมาร์ค 4 มุมและพื้นหลังกระดาษจริง (ป้องกันการตรวจจับสิ่งของในห้องเป็นกระดาษ)
+    const markerCheck = this.verifyWarpedMarkers(warpedCanvas);
+    if (!markerCheck.valid) {
+      return {
+        success: false,
+        error: markerCheck.reason || 'ไม่พบจุดมาร์คของกระดาษคำตอบ',
+        corners
+      };
+    }
+
+    // 5. วิเคราะห์ความเข้มของวงกลมแต่ละข้อ (Bubble Density Analysis)
     const gradingResult = this.readBubblesAndGrade(warpedCanvas, examKey, layoutMeta);
 
     return {
@@ -77,12 +96,28 @@ class OMREngine {
 
   /**
    * ค้นหาจุดศูนย์กลางของจุดมาร์ค 4 มุม (Marker Centers)
-   * @param {HTMLCanvasElement} canvas
-   * @returns {Array<{x, y}>|null} [TL, TR, BR, BL]
+   * รองรับทั้ง HTMLCanvasElement, HTMLVideoElement, และ HTMLImageElement
    */
-  detectCorners(canvas) {
+  detectCorners(source) {
+    let canvas = source;
+    if (!(source instanceof HTMLCanvasElement)) {
+      if (!this._detectCanvas) {
+        this._detectCanvas = document.createElement('canvas');
+      }
+      const sw = source.videoWidth || source.naturalWidth || source.width || 640;
+      const sh = source.videoHeight || source.naturalHeight || source.height || 480;
+      if (this._detectCanvas.width !== sw || this._detectCanvas.height !== sh) {
+        this._detectCanvas.width = sw;
+        this._detectCanvas.height = sh;
+      }
+      const ctx = this._detectCanvas.getContext('2d', { willReadFrequently: true });
+      ctx.drawImage(source, 0, 0, sw, sh);
+      canvas = this._detectCanvas;
+    }
+
     if (this.isCvReady && window.cv) {
-      return this.detectCornersWithOpenCV(canvas);
+      const cvCorners = this.detectCornersWithOpenCV(canvas);
+      if (cvCorners) return cvCorners;
     }
     // Fallback: ตรวจสอบด้วย Pure JavaScript Adaptive Scan
     return this.detectCornersPureJS(canvas);
@@ -118,8 +153,8 @@ class OMREngine {
         const cnt = contours.get(i);
         const area = cv.contourArea(cnt);
 
-        // คัดกรองขนาดจุดมาร์ค: ต้องไม่เล็กหรือใหญ่เกินไป (~0.04% ถึง 5% ของพื้นที่ภาพ)
-        if (area < imgArea * 0.0004 || area > imgArea * 0.08) {
+        // คัดกรองขนาดจุดมาร์ค: ต้องไม่เล็กหรือใหญ่เกินไป (~0.03% ถึง 6% ของพื้นที่ภาพ)
+        if (area < imgArea * 0.0003 || area > imgArea * 0.06) {
           cnt.delete();
           continue;
         }
@@ -128,7 +163,7 @@ class OMREngine {
         const aspectRatio = rect.width / rect.height;
 
         // จุดมาร์คต้องเป็นรูปสี่เหลี่ยมจัตุรัสค่อนข้างสมบูรณ์
-        if (aspectRatio >= 0.75 && aspectRatio <= 1.33) {
+        if (aspectRatio >= 0.72 && aspectRatio <= 1.38) {
           const moments = cv.moments(cnt);
           if (moments.m00 !== 0) {
             const cx = moments.m10 / moments.m00;
@@ -157,8 +192,8 @@ class OMREngine {
         return null;
       }
 
-      // คัดเลือก 4 จุดที่ครอบคลุมพื้นที่กว้างที่สุด 4 มุม
-      return this.selectFourOuterCorners(merged, canvas.width, canvas.height);
+      // คัดเลือก 4 จุดที่ประกอบเป็นสี่เหลี่ยมกระดาษคำตอบที่ถูกต้องและพื้นที่เหมาะสมที่สุด
+      return this.findBestQuadFromCandidates(merged, canvas.width, canvas.height);
     } catch (err) {
       console.warn('OpenCV detection error, using fallback:', err);
       return this.detectCornersPureJS(canvas);
@@ -187,30 +222,35 @@ class OMREngine {
       }
     }
     const avgBrightness = sumBrightness / sampleCount;
-    const threshold = Math.max(50, avgBrightness * 0.65);
+    // ถ้าภาพมืดเกินไป (เช่น ปิดกล้องหรือห้องมืดมาก) ไม่ต้องประมวลผล
+    if (avgBrightness < 50) return null;
 
-    // แบ่งค้นหาใน 4 จตุภาค (Quadrant)
-    // TL: (0..w/2, 0..h/2), TR: (w/2..w, 0..h/2), BL: (0..w/2, h/2..h), BR: (w/2..w, h/2..h)
+    const threshold = Math.max(45, avgBrightness * 0.65);
+
+    // ค้นหาจุดมาร์คเฉพาะจุดที่มีแกนกลางสีดำล้อมรอบด้วยกระดาษสีขาวใน 4 จตุภาค
     const corners = [
-      this.findCornerInQuadrant(data, w, h, 0, Math.floor(w * 0.45), 0, Math.floor(h * 0.45), threshold, 'TL'),
-      this.findCornerInQuadrant(data, w, h, Math.floor(w * 0.55), w, 0, Math.floor(h * 0.45), threshold, 'TR'),
-      this.findCornerInQuadrant(data, w, h, Math.floor(w * 0.55), w, Math.floor(h * 0.55), h, threshold, 'BR'),
-      this.findCornerInQuadrant(data, w, h, 0, Math.floor(w * 0.45), Math.floor(h * 0.55), h, threshold, 'BL')
+      this.findCornerInQuadrant(data, w, h, Math.floor(w * 0.02), Math.floor(w * 0.45), Math.floor(h * 0.02), Math.floor(h * 0.45), threshold, 'TL'),
+      this.findCornerInQuadrant(data, w, h, Math.floor(w * 0.55), Math.floor(w * 0.98), Math.floor(h * 0.02), Math.floor(h * 0.45), threshold, 'TR'),
+      this.findCornerInQuadrant(data, w, h, Math.floor(w * 0.55), Math.floor(w * 0.98), Math.floor(h * 0.55), Math.floor(h * 0.98), threshold, 'BR'),
+      this.findCornerInQuadrant(data, w, h, Math.floor(w * 0.02), Math.floor(w * 0.45), Math.floor(h * 0.55), Math.floor(h * 0.98), threshold, 'BL')
     ];
 
     if (corners.every(c => c !== null)) {
-      return corners;
+      const ordered = this.orderQuadCorners(corners);
+      if (this.isValidQuadGeometry(ordered, w, h)) {
+        return ordered;
+      }
     }
     return null;
   }
 
   /**
-   * ค้นหากลุ่มพิกเซลดำเข้มที่เป็นจุดมาร์คในแต่ละจตุภาค
+   * ค้นหาจุดมาร์คสี่เหลี่ยมดำในจตุภาค โดยตรวจสอบความดำภายในและขอบขาวรอบนอก (Annular Ring Filter)
    */
   findCornerInQuadrant(data, w, h, minX, maxX, minY, maxY, threshold, quad) {
     const scanStep = 4;
     let bestPoint = null;
-    let minDistanceToCorner = Infinity;
+    let bestScore = -1;
 
     const cornerTarget = {
       TL: { x: minX, y: minY },
@@ -219,27 +259,45 @@ class OMREngine {
       BL: { x: minX, y: maxY }
     }[quad];
 
-    for (let y = minY + 10; y < maxY - 10; y += scanStep) {
-      for (let x = minX + 10; x < maxX - 10; x += scanStep) {
+    for (let y = minY + 12; y < maxY - 12; y += scanStep) {
+      for (let x = minX + 12; x < maxX - 12; x += scanStep) {
         const idx = (y * w + x) * 4;
         const b = (data[idx] + data[idx + 1] + data[idx + 2]) / 3;
 
+        // แกนกลางต้องมีความเข้มมากกว่า threshold
         if (b < threshold) {
-          // ตรวจสอบว่ารอบๆ เป็นกลุ่มก้อนดำหนาหรือไม่
-          let darkNeighbors = 0;
-          const radius = 8;
-          for (let dy = -radius; dy <= radius; dy += 4) {
-            for (let dx = -radius; dx <= radius; dx += 4) {
+          let darkCount = 0;
+          let lightCount = 0;
+          const rInner = 6;
+          const rOuter = 16;
+
+          // ตรวจสอบพื้นที่สี่เหลี่ยมด้านใน
+          for (let dy = -rInner; dy <= rInner; dy += 3) {
+            for (let dx = -rInner; dx <= rInner; dx += 3) {
               const nIdx = ((y + dy) * w + (x + dx)) * 4;
               const nb = (data[nIdx] + data[nIdx + 1] + data[nIdx + 2]) / 3;
-              if (nb < threshold * 1.1) darkNeighbors++;
+              if (nb < threshold) darkCount++;
             }
           }
 
-          if (darkNeighbors >= 16) {
+          // ตรวจสอบวงแหวนรอบนอก (ต้องเป็นกระดาษขาวสว่าง)
+          const angles = [0, 0.78, 1.57, 2.35, 3.14, 3.92, 4.71, 5.49];
+          for (const a of angles) {
+            const ox = Math.round(x + Math.cos(a) * rOuter);
+            const oy = Math.round(y + Math.sin(a) * rOuter);
+            if (ox >= 0 && ox < w && oy >= 0 && oy < h) {
+              const oIdx = (oy * w + ox) * 4;
+              const ob = (data[oIdx] + data[oIdx + 1] + data[oIdx + 2]) / 3;
+              if (ob > threshold * 1.3) lightCount++;
+            }
+          }
+
+          // จุดมาร์คที่ถูกต้อง: ด้านในดำทึบ และด้านนอกขาวสว่างรอบทิศ
+          if (darkCount >= 14 && lightCount >= 5) {
             const dist = Math.hypot(x - cornerTarget.x, y - cornerTarget.y);
-            if (dist < minDistanceToCorner) {
-              minDistanceToCorner = dist;
+            const score = 1000 - dist;
+            if (score > bestScore) {
+              bestScore = score;
               bestPoint = { x, y };
             }
           }
@@ -273,59 +331,219 @@ class OMREngine {
   }
 
   /**
-   * จัดเรียงจุดมาร์ค 4 มุม: [Top-Left, Top-Right, Bottom-Right, Bottom-Left]
+   * ค้นหาชุด 4 จุดจากตัวเลือกทั้งหมดที่สร้างเป็นสี่เหลี่ยมกระดาษที่สมบูรณ์ที่สุด
    */
-  selectFourOuterCorners(points, imgW, imgH) {
+  findBestQuadFromCandidates(points, imgW, imgH) {
     if (points.length < 4) return null;
 
-    // หาจุดที่ใกล้ 4 มุมของภาพมากที่สุด
-    const corners = {
-      TL: null,
-      TR: null,
-      BR: null,
-      BL: null
-    };
-
-    let minDistTL = Infinity;
-    let minDistTR = Infinity;
-    let minDistBR = Infinity;
-    let minDistBL = Infinity;
-
-    for (const p of points) {
-      const dTL = Math.hypot(p.x, p.y);
-      const dTR = Math.hypot(p.x - imgW, p.y);
-      const dBR = Math.hypot(p.x - imgW, p.y - imgH);
-      const dBL = Math.hypot(p.x, p.y - imgH);
-
-      if (dTL < minDistTL) { minDistTL = dTL; corners.TL = p; }
-      if (dTR < minDistTR) { minDistTR = dTR; corners.TR = p; }
-      if (dBR < minDistBR) { minDistBR = dBR; corners.BR = p; }
-      if (dBL < minDistBL) { minDistBL = dBL; corners.BL = p; }
+    if (points.length === 4) {
+      const ordered = this.orderQuadCorners(points);
+      if (this.isValidQuadGeometry(ordered, imgW, imgH)) {
+        return ordered;
+      }
+      return null;
     }
 
-    // ตรวจสอบว่าทั้ง 4 จุดไม่ซ้ำกัน
-    const unique = new Set([corners.TL, corners.TR, corners.BR, corners.BL]);
-    if (unique.size === 4) {
-      return [corners.TL, corners.TR, corners.BR, corners.BL];
+    let bestQuad = null;
+    let maxArea = 0;
+    const n = Math.min(points.length, 12);
+
+    for (let i = 0; i < n - 3; i++) {
+      for (let j = i + 1; j < n - 2; j++) {
+        for (let k = j + 1; k < n - 1; k++) {
+          for (let l = k + 1; l < n; l++) {
+            const candidateSubset = [points[i], points[j], points[k], points[l]];
+            const ordered = this.orderQuadCorners(candidateSubset);
+            if (this.isValidQuadGeometry(ordered, imgW, imgH)) {
+              const area = this.calculateQuadArea(ordered);
+              if (area > maxArea) {
+                maxArea = area;
+                bestQuad = ordered;
+              }
+            }
+          }
+        }
+      }
     }
 
-    // ทางเลือกสำรอง: ใช้ผลบวกและผลต่างของพิกัด
-    // TL: x+y ต่ำสุด, BR: x+y สูงสุด, TR: x-y สูงสุด, BL: y-x สูงสุด
-    let tl = points[0], tr = points[0], br = points[0], bl = points[0];
-    let minSum = Infinity, maxSum = -Infinity, maxDiffTR = -Infinity, maxDiffBL = -Infinity;
+    return bestQuad;
+  }
 
-    for (const p of points) {
-      const sum = p.x + p.y;
-      const diffTR = p.x - p.y;
-      const diffBL = p.y - p.x;
+  /**
+   * จัดเรียงจุด 4 จุดให้เป็นลำดับตามเข็มนาฬิกา: [Top-Left, Top-Right, Bottom-Right, Bottom-Left]
+   */
+  orderQuadCorners(points) {
+    if (!points || points.length !== 4) return points;
 
-      if (sum < minSum) { minSum = sum; tl = p; }
-      if (sum > maxSum) { maxSum = sum; br = p; }
-      if (diffTR > maxDiffTR) { maxDiffTR = diffTR; tr = p; }
-      if (diffBL > maxDiffBL) { maxDiffBL = diffBL; bl = p; }
+    // 1. หาจุด Centroid
+    const cx = (points[0].x + points[1].x + points[2].x + points[3].x) / 4;
+    const cy = (points[0].y + points[1].y + points[2].y + points[3].y) / 4;
+
+    // 2. เรียงตามมุมองศา
+    const sorted = [...points].sort((a, b) => {
+      const angleA = Math.atan2(a.y - cy, a.x - cx);
+      const angleB = Math.atan2(b.y - cy, b.x - cx);
+      return angleA - angleB;
+    });
+
+    // 3. หาจุดที่ใกล้ (0,0) ที่สุดเป็น TL
+    let minD = Infinity;
+    let tlIdx = 0;
+    for (let i = 0; i < 4; i++) {
+      const d = Math.hypot(sorted[i].x, sorted[i].y);
+      if (d < minD) {
+        minD = d;
+        tlIdx = i;
+      }
     }
 
-    return [tl, tr, br, bl];
+    const ordered = [];
+    for (let i = 0; i < 4; i++) {
+      ordered.push(sorted[(tlIdx + i) % 4]);
+    }
+
+    // ตรวจสอบทิศตามเข็มนาฬิกา
+    const v1x = ordered[1].x - ordered[0].x;
+    const v1y = ordered[1].y - ordered[0].y;
+    const v2x = ordered[2].x - ordered[1].x;
+    const v2y = ordered[2].y - ordered[1].y;
+    const cp = v1x * v2y - v1y * v2x;
+    if (cp < 0) {
+      return [ordered[0], ordered[3], ordered[2], ordered[1]];
+    }
+
+    return ordered;
+  }
+
+  /**
+   * คำนวณพื้นที่รูปสี่เหลี่ยม
+   */
+  calculateQuadArea([tl, tr, br, bl]) {
+    return 0.5 * Math.abs((tl.x*tr.y - tl.y*tr.x) + (tr.x*br.y - tr.y*br.x) + (br.x*bl.y - br.y*bl.x) + (bl.x*tl.y - bl.y*tl.x));
+  }
+
+  /**
+   * ตรวจสอบความสมบูรณ์ทางเรขาคณิตของรูปสี่เหลี่ยมกระดาษคำตอบ
+   */
+  isValidQuadGeometry(corners, imgW, imgH) {
+    if (!corners || corners.length !== 4) return false;
+    const [tl, tr, br, bl] = corners;
+
+    // 1. ตรวจสอบพิกัดไม่หลุดขอบภาพ
+    for (const p of corners) {
+      if (p.x < -15 || p.x > imgW + 15 || p.y < -15 || p.y > imgH + 15) return false;
+    }
+
+    // 2. ตรวจสอบความนูน (Convexity) โดยใช้ Cross Product ของทุกด้านตามเข็มนาฬิกา
+    const v1x = tr.x - tl.x, v1y = tr.y - tl.y;
+    const v2x = br.x - tr.x, v2y = br.y - tr.y;
+    const v3x = bl.x - br.x, v3y = bl.y - br.y;
+    const v4x = tl.x - bl.x, v4y = tl.y - bl.y;
+
+    const cp1 = v1x * v2y - v1y * v2x;
+    const cp2 = v2x * v3y - v2y * v3x;
+    const cp3 = v3x * v4y - v3y * v4x;
+    const cp4 = v4x * v1y - v4y * v1x;
+
+    if (!(cp1 > 0 && cp2 > 0 && cp3 > 0 && cp4 > 0)) {
+      return false;
+    }
+
+    // 3. ตรวจสอบพื้นที่ (ต้องไม่เล็กกว่า 5% ของจอภาพ และไม่ล้นจอเกินไป)
+    const area = this.calculateQuadArea(corners);
+    const imgArea = imgW * imgH;
+    if (area < imgArea * 0.05 || area > imgArea * 0.98) {
+      return false;
+    }
+
+    // 4. ความยาวของแต่ละด้าน
+    const dTop = Math.hypot(v1x, v1y);
+    const dRight = Math.hypot(v2x, v2y);
+    const dBottom = Math.hypot(v3x, v3y);
+    const dLeft = Math.hypot(v4x, v4y);
+
+    const minSide = Math.min(dTop, dRight, dBottom, dLeft);
+    if (minSide < Math.min(imgW, imgH) * 0.12) {
+      return false;
+    }
+
+    // 5. สัดส่วน กว้าง : ยาว (Aspect Ratio)
+    const avgW = (dTop + dBottom) / 2;
+    const avgH = (dLeft + dRight) / 2;
+    const aspect = avgW / avgH;
+    if (aspect < 0.35 || aspect > 2.2) {
+      return false;
+    }
+
+    // 6. ด้านตรงข้ามต้องไม่ต่างกันเกิน 60%
+    if (Math.abs(dTop - dBottom) / Math.max(dTop, dBottom) > 0.60) return false;
+    if (Math.abs(dLeft - dRight) / Math.max(dLeft, dRight) > 0.60) return false;
+
+    return true;
+  }
+
+  /**
+   * ตรวจสอบยืนยันจุดมาร์คสี่เหลี่ยมสีดำ 4 มุมบนภาพที่ Warp แล้ว (ป้องกันการสับสนกับโต๊ะ/ผนัง/สิ่งของ)
+   */
+  verifyWarpedMarkers(warpedCanvas) {
+    const w = warpedCanvas.width;
+    const h = warpedCanvas.height;
+    const ctx = warpedCanvas.getContext('2d', { willReadFrequently: true });
+    const imgData = ctx.getImageData(0, 0, w, h);
+    const data = imgData.data;
+
+    // 1. ตรวจสอบความสว่างของกระดาษโดยรวม
+    let paperBrightnessSum = 0;
+    let samples = 0;
+    for (let i = 0; i < 40; i++) {
+      const rx = Math.floor(w * 0.2 + (i % 8) * w * 0.08);
+      const ry = Math.floor(h * 0.2 + Math.floor(i / 8) * h * 0.12);
+      paperBrightnessSum += this.samplePixelBrightness(data, w, rx, ry);
+      samples++;
+    }
+    const paperBrightness = paperBrightnessSum / samples;
+
+    // หากพื้นหลังมืดเกินไป (ส่องโต๊ะไม้สีเข้ม, เสื้อผ้า, ผนังห้อง)
+    if (paperBrightness < 80) {
+      return { valid: false, reason: 'แสงน้อยหรือพื้นหลังมืดเกินไป ไม่ใช่กระดาษสีขาว' };
+    }
+
+    // 2. ตรวจสอบความดำเข้มที่ 4 มุมของภาพที่ Warp
+    const markerCheckPoints = [
+      { x: Math.round(w * 0.035), y: Math.round(h * 0.035) }, // TL
+      { x: Math.round(w * 0.965), y: Math.round(h * 0.035) }, // TR
+      { x: Math.round(w * 0.965), y: Math.round(h * 0.965) }, // BR
+      { x: Math.round(w * 0.035), y: Math.round(h * 0.965) }  // BL
+    ];
+
+    let validMarkerCount = 0;
+    for (const pt of markerCheckPoints) {
+      let darkCount = 0;
+      let total = 0;
+      const radius = 12;
+      for (let dy = -radius; dy <= radius; dy += 3) {
+        for (let dx = -radius; dx <= radius; dx += 3) {
+          const px = Math.min(w - 1, Math.max(0, pt.x + dx));
+          const py = Math.min(h - 1, Math.max(0, pt.y + dy));
+          const b = this.samplePixelBrightness(data, w, px, py);
+          if (b < paperBrightness * 0.65) {
+            darkCount++;
+          }
+          total++;
+        }
+      }
+
+      if (total > 0 && (darkCount / total) >= 0.20) {
+        validMarkerCount++;
+      }
+    }
+
+    // ต้องผ่านการตรวจสอบจุดมาร์คอย่างน้อย 3 ใน 4 จุด
+    if (validMarkerCount < 3) {
+      return { valid: false, reason: `ไม่พบจุดมาร์คดำ 4 มุมของกระดาษคำตอบ (ตรวจพบ ${validMarkerCount}/4 จุด)` };
+    }
+
+    return { valid: true, paperBrightness, validMarkerCount };
   }
 
   /**

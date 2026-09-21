@@ -17,6 +17,7 @@ document.addEventListener('DOMContentLoaded', () => {
   let scanAnimationId = null;
   let currentCameraFacing = 'environment'; // 'environment' (กล้องหลัง) หรือ 'user' (กล้องหน้า)
   let lastGradedTime = 0; // หน่วงเวลาการตรวจซ้ำ
+  let stableFrameCount = 0; // นับเฟรมที่ตรวจจับจุดมาร์คได้นิ่งและเสถียร
   let generatedLayoutMeta = null;
 
   // Web Audio Context สำหรับเสียง Beep ตรวจเสร็จ
@@ -683,25 +684,56 @@ document.addEventListener('DOMContentLoaded', () => {
     }
 
     const now = Date.now();
-    // หน่วงเวลาตรวจซ้ำหลังจากเพิ่งแสดงคะแนน 1.8 วินาที (ไม่บล็อกหน้าจอกล้อง ให้ส่องแผ่นต่อไปตรวจต่อได้ทันที)
-    if (now - lastGradedTime > 1800) {
-      const result = omrEngine.processFrame(videoElem, activeExam, generatedLayoutMeta);
 
-      if (result.success && result.corners) {
-        // วาดกรอบสี่เหลี่ยมเชื่อม 4 มุม
-        drawDetectedCorners(ctx, result.corners);
+    // 1. ตรวจจับจุดมาร์คและรูปทรงกระดาษแบบเรียลไทม์
+    const corners = omrEngine.detectCorners(videoElem);
 
-        // ตรวจจับพบครบและตรวจสำเร็จ!
-        lastGradedTime = now;
-        playBeep(true);
-        displayScoreResult(result);
-      } else if (result.corners && result.corners.length > 0) {
-        // วาดจุดที่ตรวจพบบางส่วน
-        drawPartialCorners(ctx, result.corners);
+    if (corners && omrEngine.isValidQuadGeometry(corners, overlayCanvas.width, overlayCanvas.height)) {
+      // วาดกรอบสี่เหลี่ยมสีเขียวล็อกตำแหน่งกระดาษแบบเรียลไทม์
+      drawDetectedCorners(ctx, corners);
+      stableFrameCount++;
+
+      if (stableFrameCount < 2) {
+        scanStatusText.innerHTML = '<span class="text-amber-300 font-medium">🟡 กำลังล็อกตำแหน่งกระดาษ... ถือกล้องให้นิ่ง</span>';
+      } else {
+        // เมื่อตรวจจับได้นิ่งต่อเนื่องอย่างน้อย 2 เฟรม และพ้นระยะหน่วงเวลาตรวจซ้ำ (2.2 วินาที)
+        if (now - lastGradedTime > 2200) {
+          scanStatusText.innerHTML = '<span class="text-emerald-400 font-bold animate-pulse">🟢 พบกระดาษคำตอบแล้ว กำลังตรวจ...</span>';
+          const result = omrEngine.processFrame(videoElem, activeExam, generatedLayoutMeta);
+
+          if (result.success) {
+            lastGradedTime = now;
+            playBeep(true);
+            displayScoreResult(result, false);
+            flashSuccessOverlay(ctx, corners);
+            scanStatusText.innerHTML = `<span class="text-emerald-400 font-bold">✓ ตรวจสำเร็จ! ได้ ${result.score}/${result.total} คะแนน</span>`;
+            stableFrameCount = 0;
+          } else {
+            scanStatusText.innerHTML = `<span class="text-amber-300">${result.error || 'กรุณาถือกล้องให้นิ่งและขยับเข้าใกล้กระดาษอีกนิด'}</span>`;
+          }
+        } else {
+          scanStatusText.innerHTML = '<span class="text-emerald-400 font-bold">🟢 พบกระดาษคำตอบแล้ว (พร้อมตรวจใบถัดไป)</span>';
+        }
+      }
+    } else {
+      stableFrameCount = 0;
+      if (now - lastGradedTime > 2500) {
+        scanStatusText.innerHTML = '<span class="text-white/80">📷 ส่องกล้องให้เห็นกระดาษคำตอบและจุดมาร์ค 4 มุมครบถ้วน</span>';
       }
     }
 
     scanAnimationId = requestAnimationFrame(runCameraScanLoop);
+  }
+
+  function flashSuccessOverlay(ctx, corners) {
+    ctx.fillStyle = 'rgba(16, 185, 129, 0.35)';
+    ctx.beginPath();
+    ctx.moveTo(corners[0].x, corners[0].y);
+    ctx.lineTo(corners[1].x, corners[1].y);
+    ctx.lineTo(corners[2].x, corners[2].y);
+    ctx.lineTo(corners[3].x, corners[3].y);
+    ctx.closePath();
+    ctx.fill();
   }
 
   function drawDetectedCorners(ctx, corners) {
@@ -737,13 +769,16 @@ document.addEventListener('DOMContentLoaded', () => {
   }
 
   // แสดงผลคะแนนทันที (ไม่บังกล้อง 100% และบอกแค่ ถูก/ผิด ไม่บอกเฉลย ก ข ค ง)
-  function displayScoreResult(result) {
+  function displayScoreResult(result, isSimulation = false) {
     if (scoreBigNumber) scoreBigNumber.textContent = result.score;
     if (scoreTotalQuestions) scoreTotalQuestions.textContent = `/ ${result.total}`;
 
     if (scorePercentBadge) {
-      scorePercentBadge.textContent = `${result.percentage}%`;
-      if (result.percentage >= 80) {
+      const modeText = isSimulation ? ' • กระดาษจำลอง' : '';
+      scorePercentBadge.textContent = `${result.percentage}%${modeText}`;
+      if (isSimulation) {
+        scorePercentBadge.className = 'px-2.5 py-1 rounded-full text-xs font-bold bg-violet-100 text-violet-800';
+      } else if (result.percentage >= 80) {
         scorePercentBadge.className = 'px-2.5 py-1 rounded-full text-xs font-bold bg-emerald-100 text-emerald-800';
       } else if (result.percentage >= 50) {
         scorePercentBadge.className = 'px-2.5 py-1 rounded-full text-xs font-bold bg-indigo-100 text-indigo-800';
@@ -858,8 +893,8 @@ document.addEventListener('DOMContentLoaded', () => {
       const result = omrEngine.processFrame(simCanvas, activeExam, generatedLayoutMeta);
       if (result.success) {
         playBeep(true);
-        displayScoreResult(result);
-        showToast('ทดสอบตรวจกระดาษจำลองสำเร็จ!', 'success');
+        displayScoreResult(result, true);
+        showToast('ทดสอบตรวจกระดาษจำลองสำเร็จ (โหมดจำลอง)', 'info');
       } else {
         showToast('การจำลองล้มเหลว: ' + result.error, 'error');
       }
