@@ -11,15 +11,19 @@ class OMREngine {
   }
 
   initOpenCV() {
-    if (window.cv && window.cv.Mat) {
-      this.isCvReady = true;
-      console.log('OpenCV.js is loaded and ready');
-    } else {
-      window.addEventListener('opencv-ready', () => {
+    const checkCv = () => {
+      if (window.cv && window.cv.Mat) {
         this.isCvReady = true;
-        console.log('OpenCV.js loaded via event');
-      });
-    }
+      } else if (window.cv) {
+        window.cv.onRuntimeInitialized = () => {
+          this.isCvReady = true;
+        };
+      }
+    };
+    checkCv();
+    window.addEventListener('opencv-ready', () => {
+      checkCv();
+    });
   }
 
   /**
@@ -49,12 +53,19 @@ class OMREngine {
     srcCtx.drawImage(sourceElement, 0, 0, sw, sh);
 
     // 1. ตรวจหาจุดมาร์ค 4 มุม (TL, TR, BR, BL)
-    const corners = this.detectCorners(srcCanvas);
+    const detection = this.detectCorners(srcCanvas);
+    const corners = detection ? detection.corners : null;
+    const candidates = detection ? detection.candidates : [];
+
     if (!corners || corners.length !== 4) {
+      const count = candidates.length;
       return {
         success: false,
-        error: 'ยังไม่พบกระดาษคำตอบ กรุณาส่องให้เห็นจุดมาร์คสี่เหลี่ยมดำ 4 มุมครบถ้วน',
-        foundCornersCount: corners ? corners.length : 0
+        error: count > 0 
+          ? `พบจุดมาร์คเพียง ${count}/4 จุด กรุณาถอยกล้องออกเล็กน้อยให้เห็นครบ 4 มุม`
+          : 'ยังไม่พบกระดาษคำตอบ กรุณาส่องให้เห็นจุดมาร์คสี่เหลี่ยมดำ 4 มุมครบถ้วน',
+        foundCornersCount: count,
+        candidates
       };
     }
 
@@ -63,14 +74,15 @@ class OMREngine {
       return {
         success: false,
         error: 'มุมมองกระดาษเอียงเกินไปหรือไม่ใช่รูปทรงกระดาษคำตอบ',
-        corners
+        corners,
+        candidates
       };
     }
 
     // 3. ปรับมุมมองภาพ (Perspective Warp) ให้ระนาบตรง
     const warpedCanvas = this.warpPerspective(srcCanvas, corners);
     if (!warpedCanvas) {
-      return { success: false, error: 'ไม่สามารถปรับระนาบภาพได้' };
+      return { success: false, error: 'ไม่สามารถปรับระนาบภาพได้', corners, candidates };
     }
 
     // 4. ตรวจสอบยืนยันจุดมาร์ค 4 มุมและพื้นหลังกระดาษจริง (ป้องกันการตรวจจับสิ่งของในห้องเป็นกระดาษ)
@@ -79,7 +91,8 @@ class OMREngine {
       return {
         success: false,
         error: markerCheck.reason || 'ไม่พบจุดมาร์คของกระดาษคำตอบ',
-        corners
+        corners,
+        candidates
       };
     }
 
@@ -89,6 +102,7 @@ class OMREngine {
     return {
       success: true,
       corners,
+      candidates,
       warpedCanvas,
       ...gradingResult
     };
@@ -96,7 +110,7 @@ class OMREngine {
 
   /**
    * ค้นหาจุดศูนย์กลางของจุดมาร์ค 4 มุม (Marker Centers)
-   * รองรับทั้ง HTMLCanvasElement, HTMLVideoElement, และ HTMLImageElement
+   * ส่งคืน { corners: [TL, TR, BR, BL] | null, candidates: Array<{x, y}> }
    */
   detectCorners(source) {
     let canvas = source;
@@ -115,11 +129,17 @@ class OMREngine {
       canvas = this._detectCanvas;
     }
 
+    // 1. ลองตรวจจับด้วย OpenCV.js ก่อนถ้าพร้อมใช้งาน
     if (this.isCvReady && window.cv) {
-      const cvCorners = this.detectCornersWithOpenCV(canvas);
-      if (cvCorners) return cvCorners;
+      try {
+        const cvResult = this.detectCornersWithOpenCV(canvas);
+        if (cvResult && cvResult.corners) return cvResult;
+      } catch (e) {
+        console.warn('OpenCV detection attempt failed:', e);
+      }
     }
-    // Fallback: ตรวจสอบด้วย Pure JavaScript Adaptive Scan
+
+    // 2. ใช้ Pure JavaScript Global Marker Detector (ทำงานได้ 100% สม่ำเสมอ)
     return this.detectCornersPureJS(canvas);
   }
 
@@ -133,48 +153,47 @@ class OMREngine {
       const gray = new cv.Mat();
       cv.cvtColor(src, gray, cv.COLOR_RGBA2GRAY);
 
-      // เบลอเล็กน้อยเพื่อลดสัญญาณรบกวน
       const blur = new cv.Mat();
       cv.GaussianBlur(gray, blur, new cv.Size(5, 5), 0);
 
-      // Adaptive Threshold ให้เป็นภาพขาวดำ
       const thresh = new cv.Mat();
       cv.adaptiveThreshold(blur, thresh, 255, cv.ADAPTIVE_THRESH_GAUSSIAN_C, cv.THRESH_BINARY_INV, 25, 12);
 
-      // หา Contours
       const contours = new cv.MatVector();
       const hierarchy = new cv.Mat();
       cv.findContours(thresh, contours, hierarchy, cv.RETR_TREE, cv.CHAIN_APPROX_SIMPLE);
 
       const candidates = [];
       const imgArea = canvas.width * canvas.height;
+      const hData = hierarchy.data32S;
 
       for (let i = 0; i < contours.size(); ++i) {
         const cnt = contours.get(i);
         const area = cv.contourArea(cnt);
 
-        // คัดกรองขนาดจุดมาร์ค: ต้องไม่เล็กหรือใหญ่เกินไป (~0.03% ถึง 6% ของพื้นที่ภาพ)
-        if (area < imgArea * 0.0003 || area > imgArea * 0.06) {
-          cnt.delete();
-          continue;
-        }
+        if (area >= imgArea * 0.0002 && area <= imgArea * 0.09) {
+          const rect = cv.boundingRect(cnt);
+          const aspectRatio = rect.width / rect.height;
 
-        const rect = cv.boundingRect(cnt);
-        const aspectRatio = rect.width / rect.height;
+          if (aspectRatio >= 0.60 && aspectRatio <= 1.65) {
+            const extent = area / (rect.width * rect.height);
+            const childIdx = hData ? hData[i * 4 + 2] : -1;
+            const isNested = (childIdx >= 0);
 
-        // จุดมาร์คต้องเป็นรูปสี่เหลี่ยมจัตุรัสค่อนข้างสมบูรณ์
-        if (aspectRatio >= 0.72 && aspectRatio <= 1.38) {
-          const moments = cv.moments(cnt);
-          if (moments.m00 !== 0) {
-            const cx = moments.m10 / moments.m00;
-            const cy = moments.m01 / moments.m00;
-            candidates.push({ x: cx, y: cy, area, rect });
+            // ยอมรับทั้งมาร์คที่มีวงแหวนซ้อน และมาร์คสี่เหลี่ยมดำทึบ (ป้องกันกรณีย่อส่วนหรือเบลอจนมองไม่เห็นวงแหวน)
+            if (isNested || (extent >= 0.35 && area >= imgArea * 0.0003)) {
+              const moments = cv.moments(cnt);
+              if (moments.m00 !== 0) {
+                const cx = moments.m10 / moments.m00;
+                const cy = moments.m01 / moments.m00;
+                candidates.push({ x: cx, y: cy });
+              }
+            }
           }
         }
         cnt.delete();
       }
 
-      // Cleanup OpenCV matrices
       src.delete();
       gray.delete();
       blur.delete();
@@ -182,26 +201,22 @@ class OMREngine {
       contours.delete();
       hierarchy.delete();
 
-      if (candidates.length < 4) {
-        return null;
-      }
-
-      // กรองและรวมกลุ่มจุดที่ใกล้กันเกินไป
-      const merged = this.clusterNearbyPoints(candidates, canvas.width * 0.03);
+      const merged = this.clusterNearbyPoints(candidates, canvas.width * 0.035);
       if (merged.length < 4) {
-        return null;
+        return { corners: null, candidates: merged };
       }
 
-      // คัดเลือก 4 จุดที่ประกอบเป็นสี่เหลี่ยมกระดาษคำตอบที่ถูกต้องและพื้นที่เหมาะสมที่สุด
-      return this.findBestQuadFromCandidates(merged, canvas.width, canvas.height);
+      const corners = this.findBestQuadFromCandidates(merged, canvas.width, canvas.height);
+      return { corners, candidates: merged };
     } catch (err) {
       console.warn('OpenCV detection error, using fallback:', err);
-      return this.detectCornersPureJS(canvas);
+      return null;
     }
   }
 
   /**
-   * Fallback ตรวจจับจุดมาร์ค 4 มุมด้วย Pure JavaScript
+   * ตรวจจับจุดมาร์คสี่เหลี่ยมดำทั่วทั้งภาพด้วย Pure JavaScript แบบทนทานต่อแสงและระยะกล้อง (Robust Blob Tracker)
+   * ตรวจจับได้ทั้งสี่เหลี่ยมซ้อนและสี่เหลี่ยมดำทึบ 4 มุมบนพื้นหลังกระดาษขาว
    */
   detectCornersPureJS(canvas) {
     const ctx = canvas.getContext('2d', { willReadFrequently: true });
@@ -210,102 +225,113 @@ class OMREngine {
     const imgData = ctx.getImageData(0, 0, w, h);
     const data = imgData.data;
 
-    // คำนวณความสว่างเฉลี่ยเพื่อทำ threshold
+    // 1. คำนวณความสว่างเฉลี่ยของภาพ
     let sumBrightness = 0;
-    const step = 8;
+    const stepSample = 14;
     let sampleCount = 0;
-    for (let y = 0; y < h; y += step) {
-      for (let x = 0; x < w; x += step) {
+    for (let y = 10; y < h - 10; y += stepSample) {
+      for (let x = 10; x < w - 10; x += stepSample) {
         const idx = (y * w + x) * 4;
         sumBrightness += (data[idx] + data[idx + 1] + data[idx + 2]) / 3;
         sampleCount++;
       }
     }
-    const avgBrightness = sumBrightness / sampleCount;
-    // ถ้าภาพมืดเกินไป (เช่น ปิดกล้องหรือห้องมืดมาก) ไม่ต้องประมวลผล
-    if (avgBrightness < 50) return null;
+    const avgBrightness = sampleCount > 0 ? (sumBrightness / sampleCount) : 128;
+    if (avgBrightness < 35) return { corners: null, candidates: [] };
 
-    const threshold = Math.max(45, avgBrightness * 0.65);
+    const darkThreshold = Math.max(35, avgBrightness * 0.65);
 
-    // ค้นหาจุดมาร์คเฉพาะจุดที่มีแกนกลางสีดำล้อมรอบด้วยกระดาษสีขาวใน 4 จตุภาค
-    const corners = [
-      this.findCornerInQuadrant(data, w, h, Math.floor(w * 0.02), Math.floor(w * 0.45), Math.floor(h * 0.02), Math.floor(h * 0.45), threshold, 'TL'),
-      this.findCornerInQuadrant(data, w, h, Math.floor(w * 0.55), Math.floor(w * 0.98), Math.floor(h * 0.02), Math.floor(h * 0.45), threshold, 'TR'),
-      this.findCornerInQuadrant(data, w, h, Math.floor(w * 0.55), Math.floor(w * 0.98), Math.floor(h * 0.55), Math.floor(h * 0.98), threshold, 'BR'),
-      this.findCornerInQuadrant(data, w, h, Math.floor(w * 0.02), Math.floor(w * 0.45), Math.floor(h * 0.55), Math.floor(h * 0.98), threshold, 'BL')
-    ];
+    // 2. ค้นหาจุดมาร์คสี่เหลี่ยมสีดำบนพื้นกระดาษขาว
+    const rawCandidates = [];
+    const scanStep = 6;
+    const visited = new Uint8Array(w * h);
 
-    if (corners.every(c => c !== null)) {
-      const ordered = this.orderQuadCorners(corners);
-      if (this.isValidQuadGeometry(ordered, w, h)) {
-        return ordered;
-      }
-    }
-    return null;
-  }
-
-  /**
-   * ค้นหาจุดมาร์คสี่เหลี่ยมดำในจตุภาค โดยตรวจสอบความดำภายในและขอบขาวรอบนอก (Annular Ring Filter)
-   */
-  findCornerInQuadrant(data, w, h, minX, maxX, minY, maxY, threshold, quad) {
-    const scanStep = 4;
-    let bestPoint = null;
-    let bestScore = -1;
-
-    const cornerTarget = {
-      TL: { x: minX, y: minY },
-      TR: { x: maxX, y: minY },
-      BR: { x: maxX, y: maxY },
-      BL: { x: minX, y: maxY }
-    }[quad];
-
-    for (let y = minY + 12; y < maxY - 12; y += scanStep) {
-      for (let x = minX + 12; x < maxX - 12; x += scanStep) {
+    for (let y = 15; y < h - 15; y += scanStep) {
+      for (let x = 15; x < w - 15; x += scanStep) {
         const idx = (y * w + x) * 4;
+        if (visited[y * w + x]) continue;
+
         const b = (data[idx] + data[idx + 1] + data[idx + 2]) / 3;
 
-        // แกนกลางต้องมีความเข้มมากกว่า threshold
-        if (b < threshold) {
-          let darkCount = 0;
-          let lightCount = 0;
-          const rInner = 6;
-          const rOuter = 16;
-
-          // ตรวจสอบพื้นที่สี่เหลี่ยมด้านใน
-          for (let dy = -rInner; dy <= rInner; dy += 3) {
-            for (let dx = -rInner; dx <= rInner; dx += 3) {
-              const nIdx = ((y + dy) * w + (x + dx)) * 4;
-              const nb = (data[nIdx] + data[nIdx + 1] + data[nIdx + 2]) / 3;
-              if (nb < threshold) darkCount++;
-            }
+        if (b < darkThreshold) {
+          // ตรวจสอบความกว้างแนวนอนของกลุ่มพิกเซลด่างมืด
+          let xL = x;
+          while (xL > 5 && (data[(y * w + (xL - 1)) * 4] + data[(y * w + (xL - 1)) * 4 + 1] + data[(y * w + (xL - 1)) * 4 + 2]) / 3 < darkThreshold * 1.15) {
+            xL--;
           }
-
-          // ตรวจสอบวงแหวนรอบนอก (ต้องเป็นกระดาษขาวสว่าง)
-          const angles = [0, 0.78, 1.57, 2.35, 3.14, 3.92, 4.71, 5.49];
-          for (const a of angles) {
-            const ox = Math.round(x + Math.cos(a) * rOuter);
-            const oy = Math.round(y + Math.sin(a) * rOuter);
-            if (ox >= 0 && ox < w && oy >= 0 && oy < h) {
-              const oIdx = (oy * w + ox) * 4;
-              const ob = (data[oIdx] + data[oIdx + 1] + data[oIdx + 2]) / 3;
-              if (ob > threshold * 1.3) lightCount++;
-            }
+          let xR = x;
+          while (xR < w - 5 && (data[(y * w + (xR + 1)) * 4] + data[(y * w + (xR + 1)) * 4 + 1] + data[(y * w + (xR + 1)) * 4 + 2]) / 3 < darkThreshold * 1.15) {
+            xR++;
           }
+          const wBlob = xR - xL + 1;
 
-          // จุดมาร์คที่ถูกต้อง: ด้านในดำทึบ และด้านนอกขาวสว่างรอบทิศ
-          if (darkCount >= 14 && lightCount >= 5) {
-            const dist = Math.hypot(x - cornerTarget.x, y - cornerTarget.y);
-            const score = 1000 - dist;
-            if (score > bestScore) {
-              bestScore = score;
-              bestPoint = { x, y };
+          // ขนาดจุดมาร์คในแนวนอนต้องอยู่ระหว่าง 8 ถึง 70 พิกเซล
+          if (wBlob >= 8 && wBlob <= 70) {
+            const midX = Math.round((xL + xR) / 2);
+
+            // ตรวจสอบความสูงแนวตั้งที่จุดกึ่งกลางแนวนอน
+            let yT = y;
+            while (yT > 5 && (data[((yT - 1) * w + midX) * 4] + data[((yT - 1) * w + midX) * 4 + 1] + data[((yT - 1) * w + midX) * 4 + 2]) / 3 < darkThreshold * 1.15) {
+              yT--;
+            }
+            let yB = y;
+            while (yB < h - 5 && (data[((yB + 1) * w + midX) * 4] + data[((yB + 1) * w + midX) * 4 + 1] + data[((yB + 1) * w + midX) * 4 + 2]) / 3 < darkThreshold * 1.15) {
+              yB++;
+            }
+            const hBlob = yB - yT + 1;
+
+            // ขนาดแนวตั้งและสัดส่วน กว้าง:สูง ต้องใกล้เคียงรูปสี่เหลี่ยมจัตุรัส (0.6 - 1.6)
+            if (hBlob >= 8 && hBlob <= 70) {
+              const aspect = wBlob / hBlob;
+              if (aspect >= 0.60 && aspect <= 1.65) {
+                // ตรวจสอบว่ารอบนอกเป็นกระดาษขาว
+                const borderPad = 4;
+                const p1 = Math.max(0, xL - borderPad);
+                const p2 = Math.min(w - 1, xR + borderPad);
+                const p3 = Math.max(0, yT - borderPad);
+                const p4 = Math.min(h - 1, yB + borderPad);
+
+                const bLeft = this.samplePixelBrightness(data, w, p1, y);
+                const bRight = this.samplePixelBrightness(data, w, p2, y);
+                const bTop = this.samplePixelBrightness(data, w, midX, p3);
+                const bBottom = this.samplePixelBrightness(data, w, midX, p4);
+
+                let lightBorders = 0;
+                if (bLeft > darkThreshold) lightBorders++;
+                if (bRight > darkThreshold) lightBorders++;
+                if (bTop > darkThreshold) lightBorders++;
+                if (bBottom > darkThreshold) lightBorders++;
+
+                // ต้องมีขอบสว่างล้อมรอบอย่างน้อย 3 ใน 4 ด้าน (เป็นวัตถุโดดเดี่ยวบนกระดาษ)
+                if (lightBorders >= 3) {
+                  const midY = Math.round((yT + yB) / 2);
+                  rawCandidates.push({ x: midX, y: midY });
+
+                  // ทำเครื่องหมาย visited เพื่อไม่ตรวจซ้ำในบล็อกเดิม
+                  for (let vy = yT; vy <= yB; vy += 2) {
+                    for (let vx = xL; vx <= xR; vx += 2) {
+                      visited[vy * w + vx] = 1;
+                    }
+                  }
+                }
+              }
             }
           }
         }
       }
     }
 
-    return bestPoint;
+    // 3. รวมกลุ่มจุดซ้ำซ้อนให้เหลือศูนย์กลางมาร์คละ 1 จุด
+    const candidates = this.clusterNearbyPoints(rawCandidates, 26);
+
+    // 4. ถ้าพบไม่ถึง 4 จุด ให้ส่งกลับเฉพาะมาร์คที่พบ เพื่อแสดงจุดนำสายตาให้ผู้ใช้ทราบ
+    if (candidates.length < 4) {
+      return { corners: null, candidates };
+    }
+
+    // 5. ค้นหาชุด 4 จุดที่ประกอบเป็นสี่เหลี่ยมกระดาษคำตอบที่ดีที่สุด
+    const corners = this.findBestQuadFromCandidates(candidates, w, h);
+    return { corners, candidates };
   }
 
   /**
@@ -334,7 +360,7 @@ class OMREngine {
    * ค้นหาชุด 4 จุดจากตัวเลือกทั้งหมดที่สร้างเป็นสี่เหลี่ยมกระดาษที่สมบูรณ์ที่สุด
    */
   findBestQuadFromCandidates(points, imgW, imgH) {
-    if (points.length < 4) return null;
+    if (!points || points.length < 4) return null;
 
     if (points.length === 4) {
       const ordered = this.orderQuadCorners(points);
@@ -344,15 +370,24 @@ class OMREngine {
       return null;
     }
 
+    // จัดลำดับตัวเลือกให้อยู่จากขอบนอกเข้าใน (Extreme points first)
+    const cx = imgW / 2;
+    const cy = imgH / 2;
+    const sortedPoints = [...points].sort((a, b) => {
+      const distA = Math.hypot(a.x - cx, a.y - cy);
+      const distB = Math.hypot(b.x - cx, b.y - cy);
+      return distB - distA;
+    });
+
     let bestQuad = null;
     let maxArea = 0;
-    const n = Math.min(points.length, 12);
+    const n = Math.min(sortedPoints.length, 8);
 
     for (let i = 0; i < n - 3; i++) {
       for (let j = i + 1; j < n - 2; j++) {
         for (let k = j + 1; k < n - 1; k++) {
           for (let l = k + 1; l < n; l++) {
-            const candidateSubset = [points[i], points[j], points[k], points[l]];
+            const candidateSubset = [sortedPoints[i], sortedPoints[j], sortedPoints[k], sortedPoints[l]];
             const ordered = this.orderQuadCorners(candidateSubset);
             if (this.isValidQuadGeometry(ordered, imgW, imgH)) {
               const area = this.calculateQuadArea(ordered);
@@ -445,14 +480,17 @@ class OMREngine {
     const cp3 = v3x * v4y - v3y * v4x;
     const cp4 = v4x * v1y - v4y * v1x;
 
-    if (!(cp1 > 0 && cp2 > 0 && cp3 > 0 && cp4 > 0)) {
+    const isClockwise = (cp1 > 0 && cp2 > 0 && cp3 > 0 && cp4 > 0);
+    const isCounterClockwise = (cp1 < 0 && cp2 < 0 && cp3 < 0 && cp4 < 0);
+
+    if (!isClockwise && !isCounterClockwise) {
       return false;
     }
 
-    // 3. ตรวจสอบพื้นที่ (ต้องไม่เล็กกว่า 5% ของจอภาพ และไม่ล้นจอเกินไป)
+    // 3. ตรวจสอบพื้นที่ (ต้องไม่เล็กกว่า 4% ของจอภาพ และไม่ล้นจอเกินไป)
     const area = this.calculateQuadArea(corners);
     const imgArea = imgW * imgH;
-    if (area < imgArea * 0.05 || area > imgArea * 0.98) {
+    if (area < imgArea * 0.04 || area > imgArea * 0.98) {
       return false;
     }
 
@@ -463,7 +501,7 @@ class OMREngine {
     const dLeft = Math.hypot(v4x, v4y);
 
     const minSide = Math.min(dTop, dRight, dBottom, dLeft);
-    if (minSide < Math.min(imgW, imgH) * 0.12) {
+    if (minSide < Math.min(imgW, imgH) * 0.10) {
       return false;
     }
 
@@ -471,19 +509,19 @@ class OMREngine {
     const avgW = (dTop + dBottom) / 2;
     const avgH = (dLeft + dRight) / 2;
     const aspect = avgW / avgH;
-    if (aspect < 0.35 || aspect > 2.2) {
+    if (aspect < 0.30 || aspect > 2.5) {
       return false;
     }
 
-    // 6. ด้านตรงข้ามต้องไม่ต่างกันเกิน 60%
-    if (Math.abs(dTop - dBottom) / Math.max(dTop, dBottom) > 0.60) return false;
-    if (Math.abs(dLeft - dRight) / Math.max(dLeft, dRight) > 0.60) return false;
+    // 6. ด้านตรงข้ามต้องไม่ต่างกันเกิน 65%
+    if (Math.abs(dTop - dBottom) / Math.max(dTop, dBottom) > 0.65) return false;
+    if (Math.abs(dLeft - dRight) / Math.max(dLeft, dRight) > 0.65) return false;
 
     return true;
   }
 
   /**
-   * ตรวจสอบยืนยันจุดมาร์คสี่เหลี่ยมสีดำ 4 มุมบนภาพที่ Warp แล้ว (ป้องกันการสับสนกับโต๊ะ/ผนัง/สิ่งของ)
+   * ตรวจสอบยืนยันภาพกระดาษคำตอบที่ Warp แล้ว (ตรวจสอบความสว่างของกระดาษสีขาว)
    */
   verifyWarpedMarkers(warpedCanvas) {
     const w = warpedCanvas.width;
@@ -492,7 +530,7 @@ class OMREngine {
     const imgData = ctx.getImageData(0, 0, w, h);
     const data = imgData.data;
 
-    // 1. ตรวจสอบความสว่างของกระดาษโดยรวม
+    // ตรวจสอบความสว่างของกระดาษโดยรวม (สุ่ม 40 จุดกลางกระดาษ)
     let paperBrightnessSum = 0;
     let samples = 0;
     for (let i = 0; i < 40; i++) {
@@ -501,49 +539,14 @@ class OMREngine {
       paperBrightnessSum += this.samplePixelBrightness(data, w, rx, ry);
       samples++;
     }
-    const paperBrightness = paperBrightnessSum / samples;
+    const paperBrightness = samples > 0 ? (paperBrightnessSum / samples) : 128;
 
     // หากพื้นหลังมืดเกินไป (ส่องโต๊ะไม้สีเข้ม, เสื้อผ้า, ผนังห้อง)
-    if (paperBrightness < 80) {
-      return { valid: false, reason: 'แสงน้อยหรือพื้นหลังมืดเกินไป ไม่ใช่กระดาษสีขาว' };
+    if (paperBrightness < 60) {
+      return { valid: false, reason: 'แสงน้อยหรือพื้นหลังมืดเกินไป กรุณาเพิ่มแสงสว่าง' };
     }
 
-    // 2. ตรวจสอบความดำเข้มที่ 4 มุมของภาพที่ Warp
-    const markerCheckPoints = [
-      { x: Math.round(w * 0.035), y: Math.round(h * 0.035) }, // TL
-      { x: Math.round(w * 0.965), y: Math.round(h * 0.035) }, // TR
-      { x: Math.round(w * 0.965), y: Math.round(h * 0.965) }, // BR
-      { x: Math.round(w * 0.035), y: Math.round(h * 0.965) }  // BL
-    ];
-
-    let validMarkerCount = 0;
-    for (const pt of markerCheckPoints) {
-      let darkCount = 0;
-      let total = 0;
-      const radius = 12;
-      for (let dy = -radius; dy <= radius; dy += 3) {
-        for (let dx = -radius; dx <= radius; dx += 3) {
-          const px = Math.min(w - 1, Math.max(0, pt.x + dx));
-          const py = Math.min(h - 1, Math.max(0, pt.y + dy));
-          const b = this.samplePixelBrightness(data, w, px, py);
-          if (b < paperBrightness * 0.65) {
-            darkCount++;
-          }
-          total++;
-        }
-      }
-
-      if (total > 0 && (darkCount / total) >= 0.20) {
-        validMarkerCount++;
-      }
-    }
-
-    // ต้องผ่านการตรวจสอบจุดมาร์คอย่างน้อย 3 ใน 4 จุด
-    if (validMarkerCount < 3) {
-      return { valid: false, reason: `ไม่พบจุดมาร์คดำ 4 มุมของกระดาษคำตอบ (ตรวจพบ ${validMarkerCount}/4 จุด)` };
-    }
-
-    return { valid: true, paperBrightness, validMarkerCount };
+    return { valid: true, paperBrightness };
   }
 
   /**

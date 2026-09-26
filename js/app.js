@@ -545,11 +545,13 @@ document.addEventListener('DOMContentLoaded', () => {
   // --- 7. แท็บที่ 3: กล้องตรวจข้อสอบ & แสดงคะแนนทันที (Real-time OMR Scanner) ---
   const videoElem = document.getElementById('cameraVideo');
   const overlayCanvas = document.getElementById('cameraOverlay');
+  const btnCaptureScan = document.getElementById('btnCaptureScan');
   const btnToggleCamera = document.getElementById('btnToggleCamera');
   const btnSwitchCamera = document.getElementById('btnSwitchCamera');
   const btnSimulateScan = document.getElementById('btnSimulateScan');
   const fileUploadInput = document.getElementById('fileUploadInput');
   const scanStatusText = document.getElementById('scanStatusText');
+  const scanStatusIndicator = document.getElementById('scanStatusIndicator');
   const scanExamBadge = document.getElementById('scanActiveExamBadge');
 
   // Score HUD Elements (Non-blocking & No answer key disclosure)
@@ -565,6 +567,15 @@ document.addEventListener('DOMContentLoaded', () => {
   const scoreWrongQuestionsList = document.getElementById('scoreWrongQuestionsList');
   const cameraScoreBadge = document.getElementById('cameraScoreBadge');
   const miniScoreValue = document.getElementById('miniScoreValue');
+  const snapshotCanvas = document.getElementById('snapshotCanvas');
+  const snapshotPlaceholder = document.getElementById('snapshotPlaceholder');
+  const freezeStatusBadge = document.getElementById('freezeStatusBadge');
+  const btnNextSheet = document.getElementById('btnNextSheet');
+  const btnNextSheetSide = document.getElementById('btnNextSheetSide');
+
+  // สถานะการตรึงผลคะแนนและภาพนิ่ง (Freeze-Frame & Latch State)
+  let isLatched = false;
+  let emptyFramesCount = 0;
 
   function updateActiveExamBadgeInScan() {
     if (!scanExamBadge) return;
@@ -656,6 +667,130 @@ document.addEventListener('DOMContentLoaded', () => {
     });
   }
 
+  // ฟังก์ชันบันทึกภาพนิ่งและตรึงผลคะแนน (Freeze-Frame Snapshot & Score Latch)
+  function handleGradeSuccess(result, sourceElement) {
+    isLatched = true;
+    lastGradedTime = Date.now();
+    emptyFramesCount = 0;
+
+    playBeep(true);
+    displayScoreResult(result, false);
+
+    // วาดภาพนิ่งลงใน Snapshot Canvas ด้านขวา (ตรึงภาพไว้ข้างๆ ไม่เด้งหาย)
+    if (snapshotCanvas) {
+      if (result.warpedCanvas) {
+        snapshotCanvas.width = result.warpedCanvas.width;
+        snapshotCanvas.height = result.warpedCanvas.height;
+        const sCtx = snapshotCanvas.getContext('2d');
+        sCtx.drawImage(result.warpedCanvas, 0, 0);
+      } else if (sourceElement) {
+        const sw = sourceElement.videoWidth || sourceElement.naturalWidth || sourceElement.width || 600;
+        const sh = sourceElement.videoHeight || sourceElement.naturalHeight || sourceElement.height || 800;
+        snapshotCanvas.width = sw;
+        snapshotCanvas.height = sh;
+        const sCtx = snapshotCanvas.getContext('2d');
+        sCtx.drawImage(sourceElement, 0, 0, sw, sh);
+      }
+
+      snapshotCanvas.classList.remove('hidden');
+      if (snapshotPlaceholder) snapshotPlaceholder.classList.add('hidden');
+    }
+
+    if (freezeStatusBadge) {
+      freezeStatusBadge.className = 'px-2.5 py-1 rounded-full text-xs font-bold bg-emerald-100 text-emerald-800 animate-pulse';
+      freezeStatusBadge.innerHTML = '🔒 ตรึงคะแนนแล้ว (จดคะแนนได้เลย)';
+    }
+
+    if (scanStatusIndicator) {
+      scanStatusIndicator.className = 'w-2.5 h-2.5 rounded-full bg-emerald-500';
+    }
+
+    scanStatusText.innerHTML = `<span class="text-emerald-400 font-bold">✓ ตรวจสำเร็จ ${result.score}/${result.total} คะแนน (ภาพและคะแนนถูกตรึงไว้ข้างๆ แล้ว)</span>`;
+    showToast(`ตรวจสำเร็จ! ได้ ${result.score}/${result.total} คะแนน`, 'success');
+  }
+
+  // ฟังก์ชันปลดล็อกพร้อมตรวจแผ่นถัดไป
+  function unlockNextSheet(showMessage = true) {
+    isLatched = false;
+    emptyFramesCount = 0;
+    stableFrameCount = 0;
+
+    if (overlayCanvas) {
+      const ctx = overlayCanvas.getContext('2d');
+      ctx.clearRect(0, 0, overlayCanvas.width, overlayCanvas.height);
+    }
+
+    if (freezeStatusBadge) {
+      freezeStatusBadge.className = 'px-2.5 py-1 rounded-full text-xs font-bold bg-indigo-100 text-indigo-800';
+      freezeStatusBadge.innerHTML = 'พร้อมตรวจแผ่นใหม่...';
+    }
+
+    if (scanStatusIndicator) {
+      scanStatusIndicator.className = 'w-2.5 h-2.5 rounded-full bg-emerald-400 animate-pulse';
+    }
+
+    scanStatusText.innerHTML = '<span class="text-emerald-400 font-medium animate-pulse">🟢 พร้อมตรวจแผ่นถัดไป ส่องกระดาษแผ่นใหม่ให้อยู่ในกรอบ</span>';
+    if (showMessage) {
+      showToast('พร้อมตรวจแผ่นถัดไปแล้ว', 'info');
+    }
+  }
+
+  // ปุ่มตรวจแผ่นถัดไป
+  if (btnNextSheet) {
+    btnNextSheet.addEventListener('click', () => unlockNextSheet(true));
+  }
+  if (btnNextSheetSide) {
+    btnNextSheetSide.addEventListener('click', () => unlockNextSheet(true));
+  }
+
+  // ปุ่มกดถ่ายรูปเพื่อตรวจคะแนนทันที (Manual Snapshot & Instant Grading)
+  if (btnCaptureScan) {
+    btnCaptureScan.addEventListener('click', () => {
+      if (!isScanning || !videoElem || videoElem.readyState < 2) {
+        showToast('กรุณากดเปิดกล้องก่อนถ่ายตรวจ', 'warning');
+        return;
+      }
+
+      if (!activeExam) {
+        showToast('กรุณาเลือกวิชาที่ต้องการตรวจก่อน', 'warning');
+        return;
+      }
+
+      if (!generatedLayoutMeta || generatedLayoutMeta.totalQuestions !== activeExam.totalQuestions) {
+        const { layoutMeta } = sheetGen.generateSheet({
+          totalQuestions: activeExam.totalQuestions,
+          choiceType: activeExam.choiceType || 'thai'
+        });
+        generatedLayoutMeta = layoutMeta;
+      }
+
+      scanStatusText.innerHTML = '<span class="text-emerald-400 font-bold animate-pulse">📸 กำลังถ่ายภาพและประมวลผลคำตอบ...</span>';
+
+      // สร้าง Canvas จับภาพนิ่งจากกล้องทันที
+      const snapCanvas = document.createElement('canvas');
+      snapCanvas.width = videoElem.videoWidth;
+      snapCanvas.height = videoElem.videoHeight;
+      const snapCtx = snapCanvas.getContext('2d');
+      snapCtx.drawImage(videoElem, 0, 0, snapCanvas.width, snapCanvas.height);
+
+      const result = omrEngine.processFrame(snapCanvas, activeExam, generatedLayoutMeta);
+
+      if (result.success) {
+        if (overlayCanvas && result.corners) {
+          const ctx = overlayCanvas.getContext('2d');
+          ctx.clearRect(0, 0, overlayCanvas.width, overlayCanvas.height);
+          drawDetectedCorners(ctx, result.corners);
+          flashSuccessOverlay(ctx, result.corners);
+        }
+        handleGradeSuccess(result, snapCanvas);
+      } else {
+        playBeep(false);
+        scanStatusText.innerHTML = `<span class="text-rose-400 font-medium">❌ ${result.error || 'ไม่พบกระดาษคำตอบ กรุณาส่องให้เห็นจุดมาร์คสี่เหลี่ยมดำ 4 มุมครบ'}</span>`;
+        showToast(result.error || 'ไม่พบกระดาษคำตอบ กรุณาส่องให้เห็นครบ 4 มุม', 'error');
+      }
+    });
+  }
+
   // ลูปประมวลผลกล้องแบบเรียลไทม์
   function runCameraScanLoop() {
     if (!isScanning || !videoElem || videoElem.readyState < 2) {
@@ -685,40 +820,85 @@ document.addEventListener('DOMContentLoaded', () => {
 
     const now = Date.now();
 
+    // 0. ถ้าผลคะแนนและภาพนิ่งกำลังถูกตรึงอยู่ (isLatched === true)
+    if (isLatched) {
+      // ตรวจจับว่ายกกระดาษแผ่นเก่าออกไปแล้วหรือยัง
+      const detection = omrEngine.detectCorners(videoElem);
+      const corners = detection ? detection.corners : null;
+
+      if (!corners) {
+        emptyFramesCount++;
+        // ถ้าไม่พบกระดาษติดต่อกันเกิน 16 เฟรม (~0.5 วินาที) แปลว่าครูยกกระดาษแผ่นเดิมออกแล้ว
+        if (emptyFramesCount > 16) {
+          isLatched = false;
+          emptyFramesCount = 0;
+          stableFrameCount = 0;
+
+          if (freezeStatusBadge) {
+            freezeStatusBadge.className = 'px-2.5 py-1 rounded-full text-xs font-bold bg-amber-100 text-amber-800';
+            freezeStatusBadge.innerHTML = 'พร้อมตรวจแผ่นใหม่...';
+          }
+          scanStatusText.innerHTML = '<span class="text-amber-300 font-medium">🟡 นำแผ่นเก่าออกแล้ว วางกระดาษแผ่นใหม่เพื่อตรวจต่อได้เลย</span>';
+        }
+      } else {
+        emptyFramesCount = 0;
+        // ยังเป็นกระดาษแผ่นเดิม ให้วาดกรอบเขียวนิ่งๆ ไว้ ไม่คำนวณคะแนนซ้ำ ไม่กระพริบ
+        drawDetectedCorners(ctx, corners);
+      }
+
+      scanAnimationId = requestAnimationFrame(runCameraScanLoop);
+      return;
+    }
+
     // 1. ตรวจจับจุดมาร์คและรูปทรงกระดาษแบบเรียลไทม์
-    const corners = omrEngine.detectCorners(videoElem);
+    const detection = omrEngine.detectCorners(videoElem);
+    const corners = detection ? detection.corners : null;
+    const candidates = detection ? detection.candidates : [];
 
     if (corners && omrEngine.isValidQuadGeometry(corners, overlayCanvas.width, overlayCanvas.height)) {
       // วาดกรอบสี่เหลี่ยมสีเขียวล็อกตำแหน่งกระดาษแบบเรียลไทม์
       drawDetectedCorners(ctx, corners);
       stableFrameCount++;
 
+      if (scanStatusIndicator) {
+        scanStatusIndicator.className = 'w-2.5 h-2.5 rounded-full bg-emerald-500 animate-pulse';
+      }
+
       if (stableFrameCount < 2) {
         scanStatusText.innerHTML = '<span class="text-amber-300 font-medium">🟡 กำลังล็อกตำแหน่งกระดาษ... ถือกล้องให้นิ่ง</span>';
       } else {
-        // เมื่อตรวจจับได้นิ่งต่อเนื่องอย่างน้อย 2 เฟรม และพ้นระยะหน่วงเวลาตรวจซ้ำ (2.2 วินาที)
-        if (now - lastGradedTime > 2200) {
+        // เมื่อตรวจจับได้นิ่งต่อเนื่องอย่างน้อย 2 เฟรม และพ้นระยะหน่วงเวลาตรวจซ้ำ (1.5 วินาที)
+        if (now - lastGradedTime > 1500) {
           scanStatusText.innerHTML = '<span class="text-emerald-400 font-bold animate-pulse">🟢 พบกระดาษคำตอบแล้ว กำลังตรวจ...</span>';
           const result = omrEngine.processFrame(videoElem, activeExam, generatedLayoutMeta);
 
           if (result.success) {
-            lastGradedTime = now;
-            playBeep(true);
-            displayScoreResult(result, false);
             flashSuccessOverlay(ctx, corners);
-            scanStatusText.innerHTML = `<span class="text-emerald-400 font-bold">✓ ตรวจสำเร็จ! ได้ ${result.score}/${result.total} คะแนน</span>`;
+            handleGradeSuccess(result, videoElem);
             stableFrameCount = 0;
           } else {
-            scanStatusText.innerHTML = `<span class="text-amber-300">${result.error || 'กรุณาถือกล้องให้นิ่งและขยับเข้าใกล้กระดาษอีกนิด'}</span>`;
+            scanStatusText.innerHTML = `<span class="text-amber-300">${result.error || 'กรุณาถือกล้องให้นิ่งและขยับให้พอดีกรอบ'}</span>`;
           }
         } else {
-          scanStatusText.innerHTML = '<span class="text-emerald-400 font-bold">🟢 พบกระดาษคำตอบแล้ว (พร้อมตรวจใบถัดไป)</span>';
+          scanStatusText.innerHTML = '<span class="text-emerald-400 font-bold">🟢 ตรวจเรียบร้อย (ส่องแผ่นต่อไปเพื่อตรวจได้ทันที)</span>';
         }
       }
+    } else if (candidates && candidates.length > 0) {
+      stableFrameCount = 0;
+      drawPartialCorners(ctx, candidates);
+
+      if (scanStatusIndicator) {
+        scanStatusIndicator.className = 'w-2.5 h-2.5 rounded-full bg-amber-500 animate-pulse';
+      }
+      scanStatusText.innerHTML = `<span class="text-amber-300 font-medium">🟡 พบจุดมาร์ค ${candidates.length}/4 จุด (กรุณาถอยกล้องออกเล็กน้อยให้เห็นครบ 4 มุม)</span>`;
     } else {
       stableFrameCount = 0;
+
+      if (scanStatusIndicator) {
+        scanStatusIndicator.className = 'w-2.5 h-2.5 rounded-full bg-slate-500';
+      }
       if (now - lastGradedTime > 2500) {
-        scanStatusText.innerHTML = '<span class="text-white/80">📷 ส่องกล้องให้เห็นกระดาษคำตอบและจุดมาร์ค 4 มุมครบถ้วน</span>';
+        scanStatusText.innerHTML = '<span class="text-slate-300">📷 ส่องกล้องให้เห็นจุดมาร์คสี่เหลี่ยมดำ 4 มุมของกระดาษคำตอบ</span>';
       }
     }
 
@@ -751,19 +931,26 @@ document.addEventListener('DOMContentLoaded', () => {
     corners.forEach((c, idx) => {
       ctx.fillStyle = '#10B981';
       ctx.beginPath();
-      ctx.arc(c.x, c.y, 10, 0, Math.PI * 2);
+      ctx.arc(c.x, c.y, 11, 0, Math.PI * 2);
       ctx.fill();
       ctx.fillStyle = '#FFFFFF';
       ctx.font = 'bold 12px sans-serif';
-      ctx.fillText(`${idx + 1}`, c.x - 3, c.y + 4);
+      ctx.fillText(`${idx + 1}`, c.x - 4, c.y + 4);
     });
   }
 
-  function drawPartialCorners(ctx, corners) {
-    corners.forEach(c => {
-      ctx.fillStyle = '#F59E0B'; // เหลืองแจ้งเตือน
+  function drawPartialCorners(ctx, candidates) {
+    candidates.forEach(c => {
+      // วงแหวนแจ้งเตือนรอบจุดมาร์คที่พบ
+      ctx.strokeStyle = '#F59E0B';
+      ctx.lineWidth = 3;
       ctx.beginPath();
-      ctx.arc(c.x, c.y, 8, 0, Math.PI * 2);
+      ctx.arc(c.x, c.y, 14, 0, Math.PI * 2);
+      ctx.stroke();
+
+      ctx.fillStyle = '#F59E0B';
+      ctx.beginPath();
+      ctx.arc(c.x, c.y, 5, 0, Math.PI * 2);
       ctx.fill();
     });
   }
