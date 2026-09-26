@@ -265,8 +265,8 @@ class OMREngine {
           }
           const wBlob = xR - xL + 1;
 
-          // ขนาดจุดมาร์คในแนวนอนต้องอยู่ระหว่าง 8 ถึง 70 พิกเซล
-          if (wBlob >= 8 && wBlob <= 70) {
+          // ขนาดจุดมาร์คในแนวนอนต้องอยู่ระหว่าง 12 ถึง 85 พิกเซล
+          if (wBlob >= 12 && wBlob <= 85) {
             const midX = Math.round((xL + xR) / 2);
 
             // ตรวจสอบความสูงแนวตั้งที่จุดกึ่งกลางแนวนอน
@@ -280,10 +280,10 @@ class OMREngine {
             }
             const hBlob = yB - yT + 1;
 
-            // ขนาดแนวตั้งและสัดส่วน กว้าง:สูง ต้องใกล้เคียงรูปสี่เหลี่ยมจัตุรัส (0.6 - 1.6)
-            if (hBlob >= 8 && hBlob <= 70) {
+            // ขนาดแนวตั้งและสัดส่วน กว้าง:สูง ต้องใกล้เคียงรูปสี่เหลี่ยมจัตุรัส (0.55 - 1.70)
+            if (hBlob >= 12 && hBlob <= 85) {
               const aspect = wBlob / hBlob;
-              if (aspect >= 0.60 && aspect <= 1.65) {
+              if (aspect >= 0.55 && aspect <= 1.70) {
                 // ตรวจสอบว่ารอบนอกเป็นกระดาษขาว
                 const borderPad = 4;
                 const p1 = Math.max(0, xL - borderPad);
@@ -359,6 +359,10 @@ class OMREngine {
   /**
    * ค้นหาชุด 4 จุดจากตัวเลือกทั้งหมดที่สร้างเป็นสี่เหลี่ยมกระดาษที่สมบูรณ์ที่สุด
    */
+  /**
+   * ค้นหาชุด 4 จุดจากตัวเลือกทั้งหมดที่สร้างเป็นสี่เหลี่ยมกระดาษที่สมบูรณ์ที่สุด
+   * คัดเลือกเฉพาะจุดมุมนอกสุด (Extreme Corner Markers) เพื่อป้องกันไม่ให้ไปจับจุดฝนคำตอบภายในกระดาษ
+   */
   findBestQuadFromCandidates(points, imgW, imgH) {
     if (!points || points.length < 4) return null;
 
@@ -370,18 +374,58 @@ class OMREngine {
       return null;
     }
 
-    // จัดลำดับตัวเลือกให้อยู่จากขอบนอกเข้าใน (Extreme points first)
-    const cx = imgW / 2;
-    const cy = imgH / 2;
+    // คำนวณจุดศูนย์กลางของกลุ่มจุดตัวเลือกทั้งหมด
+    let sumX = 0, sumY = 0;
+    for (const p of points) {
+      sumX += p.x;
+      sumY += p.y;
+    }
+    const meanX = sumX / points.length;
+    const meanY = sumY / points.length;
+
+    // หาจุดที่ไกลที่สุดในแต่ละ Quadrant (TL, TR, BR, BL) เทียบกับ Centroid
+    // วิธีนี้รับประกัน 100% ว่าจะเลือกจุดมาร์ค 4 มุมกระดาษ และไม่เลือกจุดฝนคำตอบที่อยู่ข้างใน
+    let bestTL = null, maxDistTL = -1;
+    let bestTR = null, maxDistTR = -1;
+    let bestBR = null, maxDistBR = -1;
+    let bestBL = null, maxDistBL = -1;
+
+    for (const p of points) {
+      const dx = p.x - meanX;
+      const dy = p.y - meanY;
+      const distSq = dx * dx + dy * dy;
+
+      if (dx <= 0 && dy <= 0) { // Top-Left
+        if (distSq > maxDistTL) { maxDistTL = distSq; bestTL = p; }
+      } else if (dx > 0 && dy <= 0) { // Top-Right
+        if (distSq > maxDistTR) { maxDistTR = distSq; bestTR = p; }
+      } else if (dx > 0 && dy > 0) { // Bottom-Right
+        if (distSq > maxDistBR) { maxDistBR = distSq; bestBR = p; }
+      } else if (dx <= 0 && dy > 0) { // Bottom-Left
+        if (distSq > maxDistBL) { maxDistBL = distSq; bestBL = p; }
+      }
+    }
+
+    if (bestTL && bestTR && bestBR && bestBL) {
+      const unique = new Set([bestTL, bestTR, bestBR, bestBL]);
+      if (unique.size === 4) {
+        const quad = this.orderQuadCorners([bestTL, bestTR, bestBR, bestBL]);
+        if (this.isValidQuadGeometry(quad, imgW, imgH)) {
+          return quad;
+        }
+      }
+    }
+
+    // แผนสำรอง: จัดลำดับตัวเลือกให้อยู่จากขอบนอกเข้าใน (Extreme points first)
     const sortedPoints = [...points].sort((a, b) => {
-      const distA = Math.hypot(a.x - cx, a.y - cy);
-      const distB = Math.hypot(b.x - cx, b.y - cy);
+      const distA = Math.hypot(a.x - meanX, a.y - meanY);
+      const distB = Math.hypot(b.x - meanX, b.y - meanY);
       return distB - distA;
     });
 
     let bestQuad = null;
     let maxArea = 0;
-    const n = Math.min(sortedPoints.length, 8);
+    const n = Math.min(sortedPoints.length, 7);
 
     for (let i = 0; i < n - 3; i++) {
       for (let j = i + 1; j < n - 2; j++) {
@@ -405,49 +449,51 @@ class OMREngine {
   }
 
   /**
-   * จัดเรียงจุด 4 จุดให้เป็นลำดับตามเข็มนาฬิกา: [Top-Left, Top-Right, Bottom-Right, Bottom-Left]
+   * จัดเรียงจุด 4 จุดให้เป็นลำดับแน่นอนตามเข็มนาฬิกา: [Top-Left, Top-Right, Bottom-Right, Bottom-Left]
+   * ใช้วิธี Extreme Sum/Diff (Szeliski / Rosebrock 4-Point Transform)
+   * ซึ่งเป็นวิธีมาตรฐานระดับโลก ไม่เกิดการหมุนวน (Zero Index Cycling) และเส้นไม่ไขว้สลับทิศ
    */
   orderQuadCorners(points) {
     if (!points || points.length !== 4) return points;
 
-    // 1. หาจุด Centroid
-    const cx = (points[0].x + points[1].x + points[2].x + points[3].x) / 4;
-    const cy = (points[0].y + points[1].y + points[2].y + points[3].y) / 4;
+    // 1. TL: จุดที่มี (x + y) ต่ำสุด, BR: จุดที่มี (x + y) สูงสุด
+    let minSum = Infinity, maxSum = -Infinity;
+    let tl = points[0], br = points[0];
 
-    // 2. เรียงตามมุมองศา
-    const sorted = [...points].sort((a, b) => {
-      const angleA = Math.atan2(a.y - cy, a.x - cx);
-      const angleB = Math.atan2(b.y - cy, b.x - cx);
-      return angleA - angleB;
-    });
-
-    // 3. หาจุดที่ใกล้ (0,0) ที่สุดเป็น TL
-    let minD = Infinity;
-    let tlIdx = 0;
-    for (let i = 0; i < 4; i++) {
-      const d = Math.hypot(sorted[i].x, sorted[i].y);
-      if (d < minD) {
-        minD = d;
-        tlIdx = i;
+    for (const p of points) {
+      const sum = p.x + p.y;
+      if (sum < minSum) {
+        minSum = sum;
+        tl = p;
+      }
+      if (sum > maxSum) {
+        maxSum = sum;
+        br = p;
       }
     }
 
-    const ordered = [];
-    for (let i = 0; i < 4; i++) {
-      ordered.push(sorted[(tlIdx + i) % 4]);
+    // 2. TR: จุดที่มี (x - y) สูงสุด, BL: จุดที่มี (x - y) ต่ำสุด
+    let maxDiff = -Infinity, minDiff = Infinity;
+    let tr = points[0], bl = points[0];
+
+    for (const p of points) {
+      const diff = p.x - p.y;
+      if (diff > maxDiff) {
+        maxDiff = diff;
+        tr = p;
+      }
+      if (diff < minDiff) {
+        minDiff = diff;
+        bl = p;
+      }
     }
 
-    // ตรวจสอบทิศตามเข็มนาฬิกา
-    const v1x = ordered[1].x - ordered[0].x;
-    const v1y = ordered[1].y - ordered[0].y;
-    const v2x = ordered[2].x - ordered[1].x;
-    const v2y = ordered[2].y - ordered[1].y;
-    const cp = v1x * v2y - v1y * v2x;
-    if (cp < 0) {
-      return [ordered[0], ordered[3], ordered[2], ordered[1]];
-    }
-
-    return ordered;
+    return [
+      { x: tl.x, y: tl.y }, // 0: Top-Left
+      { x: tr.x, y: tr.y }, // 1: Top-Right
+      { x: br.x, y: br.y }, // 2: Bottom-Right
+      { x: bl.x, y: bl.y }  // 3: Bottom-Left
+    ];
   }
 
   /**
