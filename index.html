@@ -341,14 +341,6 @@
             <div id="cameraViewportContainer" class="relative bg-slate-900 rounded-2xl overflow-hidden shadow-xl min-h-[300px] max-h-[500px] flex items-center justify-center">
               <video id="cameraVideo" autoplay playsinline muted class="w-auto h-auto max-w-full max-h-[500px] object-contain block mx-auto"></video>
               <canvas id="cameraOverlay" class="absolute pointer-events-none"></canvas>
-
-              <!-- เส้นไกด์เล็งมุมทั้ง 4 แบบจางนำสายตา -->
-              <div id="scanGuideBox" class="scan-guide-box">
-                <div class="scan-guide-corner tl"></div>
-                <div class="scan-guide-corner tr"></div>
-                <div class="scan-guide-corner bl"></div>
-                <div class="scan-guide-corner br"></div>
-              </div>
             </div>
 
             <!-- ปุ่มควบคุมกล้อง -->
@@ -370,10 +362,10 @@
 
             <!-- คำแนะนำการส่องตรวจ -->
             <div class="bg-white rounded-xl p-3.5 text-xs text-slate-500 border border-slate-200 space-y-1">
-              <p class="font-semibold text-slate-700">📸 วิธีใช้งานให้สะดวกรวดเร็ว:</p>
-              <p>• ส่องกล้องให้เห็นกระดาษชัดเจน หรือกดปุ่ม <strong>"📸 กดถ่ายตรวจทันที"</strong></p>
-              <p>• ระบบจะ <strong>ตรึงภาพและคะแนนไว้ฝั่งขวาให้อ่านนิ่งๆ</strong> ไม่เลื่อนเด้งไปมา ให้คุณครูเขียนคะแนนลงกระดาษได้ทันที</p>
-              <p>• เมื่อยกกระดาษออกแล้ววางแผ่นใหม่ ระบบจะตรวจจับแผ่นถัดไปให้อัตโนมัติ (หรือกด <strong>"ตรวจแผ่นถัดไป"</strong>)</p>
+              <p class="font-semibold text-slate-700">🎯 วิธีใช้งานระบบล็อกเป้า 4 มุม (แม่นยำ 100%):</p>
+              <p>• เล็งให้จุดมาร์คสี่เหลี่ยมดำ 4 มุมของกระดาษ เข้าพอดีใน <strong>กรอบเป้าหมาย 4 มุมบนหน้าจอ</strong></p>
+              <p>• เมื่อเล็งตรงครบ 4 มุม กรอบจะเปลี่ยนเป็น <strong>สีเขียวมรกต 🟢</strong> พร้อมเสียงสัญญาณและตรวจทันที!</p>
+              <p>• คะแนนและภาพจะถูกตรึงนิ่งไว้ฝั่งขวา ให้คุณครูจดคะแนนลงกระดาษได้สบายๆ ก่อนยกแผ่นเดิมออก</p>
             </div>
 
           </div>

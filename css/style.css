@@ -46,31 +46,6 @@ body {
   pointer-events: none;
 }
 
-/* Scanning Reticle Guide */
-.scan-guide-box {
-  position: absolute;
-  top: 6%;
-  left: 6%;
-  right: 6%;
-  bottom: 6%;
-  border: 1.5px dashed rgba(255, 255, 255, 0.25);
-  border-radius: 0.75rem;
-  pointer-events: none;
-  transition: opacity 0.3s ease;
-}
-
-.scan-guide-corner {
-  position: absolute;
-  width: 24px;
-  height: 24px;
-  border-color: rgba(255, 255, 255, 0.45);
-  border-style: solid;
-}
-.scan-guide-corner.tl { top: -2px; left: -2px; border-width: 3px 0 0 3px; border-top-left-radius: 6px; }
-.scan-guide-corner.tr { top: -2px; right: -2px; border-width: 3px 3px 0 0; border-top-right-radius: 6px; }
-.scan-guide-corner.bl { bottom: -2px; left: -2px; border-width: 0 0 3px 3px; border-bottom-left-radius: 6px; }
-.scan-guide-corner.br { bottom: -2px; right: -2px; border-width: 0 3px 3px 0; border-bottom-right-radius: 6px; }
-
 /* Smooth Result Card Animation */
 #scoreResultCard {
   animation: slideUpFade 0.3s cubic-bezier(0.16, 1, 0.3, 1);

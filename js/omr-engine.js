@@ -33,7 +33,7 @@ class OMREngine {
    * @param {object} layoutMeta - ข้อมูลตำแหน่งพิกัดของกระดาษคำตอบจาก SheetGenerator
    * @returns {object} ผลการตรวจ { success, score, total, percentage, answers, corners, warpedCanvas }
    */
-  processFrame(sourceElement, examKey, layoutMeta) {
+  processFrame(sourceElement, examKey, layoutMeta, targetCorners = null) {
     if (!sourceElement || !examKey || !layoutMeta) {
       return { success: false, error: 'ข้อมูลไม่ครบถ้วน' };
     }
@@ -53,7 +53,7 @@ class OMREngine {
     srcCtx.drawImage(sourceElement, 0, 0, sw, sh);
 
     // 1. ตรวจหาจุดมาร์ค 4 มุม (TL, TR, BR, BL)
-    const detection = this.detectCorners(srcCanvas);
+    const detection = this.detectCorners(srcCanvas, targetCorners);
     const corners = detection ? detection.corners : null;
     const candidates = detection ? detection.candidates : [];
 
@@ -110,9 +110,9 @@ class OMREngine {
 
   /**
    * ค้นหาจุดศูนย์กลางของจุดมาร์ค 4 มุม (Marker Centers)
-   * ส่งคืน { corners: [TL, TR, BR, BL] | null, candidates: Array<{x, y}> }
+   * รองรับทั้งโหมดล็อกเป้า 4 มุม (Target ROIs Mode) และโหมดค้นหาอัตโนมัติทั่วภาพ
    */
-  detectCorners(source) {
+  detectCorners(source, targetCorners = null) {
     let canvas = source;
     if (!(source instanceof HTMLCanvasElement)) {
       if (!this._detectCanvas) {
@@ -129,18 +129,139 @@ class OMREngine {
       canvas = this._detectCanvas;
     }
 
-    // 1. ลองตรวจจับด้วย OpenCV.js ก่อนถ้าพร้อมใช้งาน
-    if (this.isCvReady && window.cv) {
-      try {
-        const cvResult = this.detectCornersWithOpenCV(canvas);
-        if (cvResult && cvResult.corners) return cvResult;
-      } catch (e) {
-        console.warn('OpenCV detection attempt failed:', e);
+    // 1. โหมดล็อกพิกัดเป้าหมาย 4 มุม (Target ROIs Alignment Mode)
+    // ตรวจหาจุดมาร์คเฉพาะภายในกรอบเป้าหมาย 4 มุม รวดเร็ว แม่นยำ และไม่ถูกรบกวนจากขอบจอหรือโต๊ะ
+    if (targetCorners && targetCorners.length === 4) {
+      const roiRadius = Math.round(Math.min(canvas.width, canvas.height) * 0.12);
+      const roiResult = this.detectCornersInTargetROIs(canvas, targetCorners, roiRadius);
+      if (roiResult) {
+        return roiResult;
       }
     }
 
-    // 2. ใช้ Pure JavaScript Global Marker Detector (ทำงานได้ 100% สม่ำเสมอ)
-    return this.detectCornersPureJS(canvas);
+    // 2. ถ้าไม่ได้ใช้เป้าหมาย ให้ค้นหาด้วย Pure JavaScript Robust Blob Tracker
+    const globalResult = this.detectCornersPureJS(canvas);
+    return {
+      allMatched: !!(globalResult && globalResult.corners),
+      matchedCount: globalResult && globalResult.corners ? 4 : (globalResult ? globalResult.candidates.length : 0),
+      matchedCorners: globalResult && globalResult.corners ? globalResult.corners : [null, null, null, null],
+      corners: globalResult ? globalResult.corners : null,
+      candidates: globalResult ? globalResult.candidates : []
+    };
+  }
+
+  /**
+   * ตรวจจับจุดมาร์คสี่เหลี่ยมดำเฉพาะภายในกรอบเป้าหมาย 4 มุม (Target ROIs Alignment Mode)
+   * ค้นหาเฉพาะในรัศมีที่กำหนดรอบแต่ละมุม ทำให้ไม่ถูกสิ่งของอื่นในห้องรบกวน 100%
+   */
+  detectCornersInTargetROIs(canvas, targetCorners, roiRadius = 75) {
+    if (!targetCorners || targetCorners.length !== 4) return null;
+
+    const ctx = canvas.getContext('2d', { willReadFrequently: true });
+    const w = canvas.width;
+    const h = canvas.height;
+
+    const matchedCorners = [];
+    let matchedCount = 0;
+
+    for (let i = 0; i < 4; i++) {
+      const target = targetCorners[i];
+      const minX = Math.max(2, Math.floor(target.x - roiRadius));
+      const maxX = Math.min(w - 2, Math.ceil(target.x + roiRadius));
+      const minY = Math.max(2, Math.floor(target.y - roiRadius));
+      const maxY = Math.min(h - 2, Math.ceil(target.y + roiRadius));
+      const roiW = maxX - minX;
+      const roiH = maxY - minY;
+
+      if (roiW <= 10 || roiH <= 10) {
+        matchedCorners.push(null);
+        continue;
+      }
+
+      const imgData = ctx.getImageData(minX, minY, roiW, roiH);
+      const data = imgData.data;
+
+      // คำนวณความสว่างเฉลี่ยใน ROI
+      let sumB = 0;
+      let samples = 0;
+      for (let py = 4; py < roiH - 4; py += 5) {
+        for (let px = 4; px < roiW - 4; px += 5) {
+          const idx = (py * roiW + px) * 4;
+          sumB += (data[idx] + data[idx + 1] + data[idx + 2]) / 3;
+          samples++;
+        }
+      }
+      const avgB = samples > 0 ? (sumB / samples) : 128;
+      const darkThresh = Math.max(35, avgB * 0.68);
+
+      let bestBlob = null;
+      let minTargetDist = Infinity;
+
+      for (let py = 6; py < roiH - 6; py += 3) {
+        for (let px = 6; px < roiW - 6; px += 3) {
+          const idx = (py * roiW + px) * 4;
+          const b = (data[idx] + data[idx + 1] + data[idx + 2]) / 3;
+
+          if (b < darkThresh) {
+            // วัดความกว้างแนวนอน
+            let xL = px;
+            while (xL > 1 && (data[(py * roiW + (xL - 1)) * 4] + data[(py * roiW + (xL - 1)) * 4 + 1] + data[(py * roiW + (xL - 1)) * 4 + 2]) / 3 < darkThresh * 1.15) {
+              xL--;
+            }
+            let xR = px;
+            while (xR < roiW - 2 && (data[(py * roiW + (xR + 1)) * 4] + data[(py * roiW + (xR + 1)) * 4 + 1] + data[(py * roiW + (xR + 1)) * 4 + 2]) / 3 < darkThresh * 1.15) {
+              xR++;
+            }
+            const blobW = xR - xL + 1;
+
+            if (blobW >= 12 && blobW <= 90) {
+              const midX = Math.round((xL + xR) / 2);
+              let yT = py;
+              while (yT > 1 && (data[((yT - 1) * roiW + midX) * 4] + data[((yT - 1) * roiW + midX) * 4 + 1] + data[((yT - 1) * roiW + midX) * 4 + 2]) / 3 < darkThresh * 1.15) {
+                yT--;
+              }
+              let yB = py;
+              while (yB < roiH - 2 && (data[((yB + 1) * roiW + midX) * 4] + data[((yB + 1) * roiW + midX) * 4 + 1] + data[((yB + 1) * roiW + midX) * 4 + 2]) / 3 < darkThresh * 1.15) {
+                yB++;
+              }
+              const blobH = yB - yT + 1;
+
+              if (blobH >= 12 && blobH <= 90) {
+                const aspect = blobW / blobH;
+                if (aspect >= 0.50 && aspect <= 1.80) {
+                  const globalCenterX = minX + midX;
+                  const globalCenterY = minY + Math.round((yT + yB) / 2);
+                  const dist = Math.hypot(globalCenterX - target.x, globalCenterY - target.y);
+
+                  if (dist < minTargetDist && dist <= roiRadius) {
+                    minTargetDist = dist;
+                    bestBlob = { x: globalCenterX, y: globalCenterY, dist };
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+
+      if (bestBlob) {
+        matchedCorners.push(bestBlob);
+        matchedCount++;
+      } else {
+        matchedCorners.push(null);
+      }
+    }
+
+    const allMatched = (matchedCount === 4);
+    const corners = allMatched ? [matchedCorners[0], matchedCorners[1], matchedCorners[2], matchedCorners[3]] : null;
+
+    return {
+      allMatched,
+      matchedCount,
+      matchedCorners,
+      corners,
+      candidates: matchedCorners.filter(Boolean)
+    };
   }
 
   /**

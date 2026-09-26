@@ -757,6 +757,124 @@ document.addEventListener('DOMContentLoaded', () => {
     btnNextSheetSide.addEventListener('click', () => unlockNextSheet(true));
   }
 
+  // คำนวณพิกัดกรอบเป้าหมาย 4 มุม (Target Corners) โดยอิงตามสัดส่วนจริงของกระดาษคำตอบวิชานั้นๆ
+  function computeTargetCorners(videoW, videoH, layoutMeta) {
+    const sheetW = layoutMeta ? layoutMeta.canvasWidth : 650;
+    const sheetH = layoutMeta ? layoutMeta.canvasHeight : 850;
+    const sheetAR = sheetW / sheetH; // สัดส่วน กว้าง / สูง ของกระดาษ เช่น ~0.76
+
+    let targetW, targetH;
+    if (videoW < videoH) {
+      // โหมดกล้องแนวตั้ง (Portrait บนมือถือ)
+      targetW = Math.round(videoW * 0.78);
+      targetH = Math.round(targetW / sheetAR);
+      if (targetH > videoH * 0.82) {
+        targetH = Math.round(videoH * 0.82);
+        targetW = Math.round(targetH * sheetAR);
+      }
+    } else {
+      // โหมดกล้องแนวนอน (Landscape / จอคอม)
+      targetH = Math.round(videoH * 0.80);
+      targetW = Math.round(targetH * sheetAR);
+      if (targetW > videoW * 0.78) {
+        targetW = Math.round(videoW * 0.78);
+        targetH = Math.round(targetW / sheetAR);
+      }
+    }
+
+    const cx = Math.round(videoW / 2);
+    const cy = Math.round(videoH / 2);
+    const left = cx - Math.round(targetW / 2);
+    const right = cx + Math.round(targetW / 2);
+    const top = cy - Math.round(targetH / 2);
+    const bottom = cy + Math.round(targetH / 2);
+
+    return [
+      { x: left, y: top },       // 0: มุมบนซ้าย (TL)
+      { x: right, y: top },      // 1: มุมบนขวา (TR)
+      { x: right, y: bottom },   // 2: มุมล่างขวา (BR)
+      { x: left, y: bottom }     // 3: มุมล่างซ้าย (BL)
+    ];
+  }
+
+  // วาดกรอบเป้าหมาย 4 มุม พร้อมฟีดแบ็กสีแบบเรียลไทม์ (ขาว/เทา ➔ เหลือง ➔ เขียวมรกต)
+  function drawTargetReticle(ctx, targetCorners, matchedCorners, allMatched) {
+    if (!targetCorners || targetCorners.length !== 4) return;
+    const [tl, tr, br, bl] = targetCorners;
+
+    // 1. เส้นกรอบสี่เหลี่ยมเชื่อม 4 มุม
+    ctx.lineWidth = allMatched ? 4 : 2;
+    if (allMatched) {
+      ctx.strokeStyle = '#10B981'; // เขียวสดใสเมื่อล็อกเป้าตรงครบ 4 มุม
+      ctx.fillStyle = 'rgba(16, 185, 129, 0.12)';
+    } else {
+      ctx.strokeStyle = 'rgba(255, 255, 255, 0.40)'; // ขาวจางเมื่อกำลังเล็ง
+      ctx.fillStyle = 'rgba(0, 0, 0, 0.15)';
+    }
+
+    ctx.beginPath();
+    ctx.moveTo(tl.x, tl.y);
+    ctx.lineTo(tr.x, tr.y);
+    ctx.lineTo(br.x, br.y);
+    ctx.lineTo(bl.x, bl.y);
+    ctx.closePath();
+    ctx.fill();
+    ctx.stroke();
+
+    // 2. วาดกรอบฉากเป้าหมาย 4 มุม (Target Corner Brackets)
+    const bracketSize = Math.max(26, Math.round(ctx.canvas.width * 0.045));
+
+    targetCorners.forEach((tc, idx) => {
+      const isMatched = matchedCorners && matchedCorners[idx] !== null;
+      const cornerColor = allMatched 
+        ? '#10B981' 
+        : (isMatched ? '#F59E0B' : 'rgba(255, 255, 255, 0.85)');
+
+      // ทิศทางของฉากมุม
+      const dirX = (idx === 0 || idx === 3) ? 1 : -1;
+      const dirY = (idx === 0 || idx === 1) ? 1 : -1;
+
+      // วาดฉากมุม [ ┌ ┐ ┘ └ ]
+      ctx.strokeStyle = cornerColor;
+      ctx.lineWidth = isMatched ? 4.5 : 3;
+      ctx.lineCap = 'round';
+      ctx.lineJoin = 'round';
+      ctx.beginPath();
+      ctx.moveTo(tc.x, tc.y + dirY * bracketSize);
+      ctx.lineTo(tc.x, tc.y);
+      ctx.lineTo(tc.x + dirX * bracketSize, tc.y);
+      ctx.stroke();
+
+      if (isMatched && matchedCorners[idx]) {
+        // เมื่อมาร์คสีดำเข้ามาตรงช่องเป้าหมาย
+        const mc = matchedCorners[idx];
+        ctx.fillStyle = allMatched ? '#10B981' : '#F59E0B';
+        ctx.beginPath();
+        ctx.arc(mc.x, mc.y, 9, 0, Math.PI * 2);
+        ctx.fill();
+
+        ctx.strokeStyle = '#FFFFFF';
+        ctx.lineWidth = 2.5;
+        ctx.beginPath();
+        ctx.arc(mc.x, mc.y, 16, 0, Math.PI * 2);
+        ctx.stroke();
+      } else {
+        // จุดเล็งตรงกลางช่องมุม
+        ctx.fillStyle = 'rgba(255, 255, 255, 0.6)';
+        ctx.beginPath();
+        ctx.arc(tc.x, tc.y, 4, 0, Math.PI * 2);
+        ctx.fill();
+
+        // ตัวเลขระบุมุม
+        ctx.fillStyle = 'rgba(255, 255, 255, 0.85)';
+        ctx.font = 'bold 12px sans-serif';
+        ctx.textAlign = (dirX === 1) ? 'left' : 'right';
+        ctx.textBaseline = (dirY === 1) ? 'bottom' : 'top';
+        ctx.fillText(`${idx + 1}`, tc.x + dirX * 8, tc.y - dirY * 8);
+      }
+    });
+  }
+
   // ปุ่มกดถ่ายรูปเพื่อตรวจคะแนนทันที (Manual Snapshot & Instant Grading)
   if (btnCaptureScan) {
     btnCaptureScan.addEventListener('click', () => {
@@ -787,20 +905,15 @@ document.addEventListener('DOMContentLoaded', () => {
       const snapCtx = snapCanvas.getContext('2d');
       snapCtx.drawImage(videoElem, 0, 0, snapCanvas.width, snapCanvas.height);
 
-      const result = omrEngine.processFrame(snapCanvas, activeExam, generatedLayoutMeta);
+      const targetCorners = computeTargetCorners(videoElem.videoWidth, videoElem.videoHeight, generatedLayoutMeta);
+      const result = omrEngine.processFrame(snapCanvas, activeExam, generatedLayoutMeta, targetCorners);
 
       if (result.success) {
-        if (overlayCanvas && result.corners) {
-          const ctx = overlayCanvas.getContext('2d');
-          ctx.clearRect(0, 0, overlayCanvas.width, overlayCanvas.height);
-          drawDetectedCorners(ctx, result.corners);
-          flashSuccessOverlay(ctx, result.corners);
-        }
         handleGradeSuccess(result, snapCanvas);
       } else {
         playBeep(false);
         scanStatusText.innerHTML = `<span class="text-rose-400 font-medium">❌ ${result.error || 'ไม่พบกระดาษคำตอบ กรุณาส่องให้เห็นจุดมาร์คสี่เหลี่ยมดำ 4 มุมครบ'}</span>`;
-        showToast(result.error || 'ไม่พบกระดาษคำตอบ กรุณาส่องให้เห็นครบ 4 มุม', 'error');
+        showToast(result.error || 'ไม่พบกระดาษคำตอบ กรุณาส่องให้เข้ากรอบ 4 มุม', 'error');
       }
     });
   }
@@ -826,7 +939,7 @@ document.addEventListener('DOMContentLoaded', () => {
     }
   }
 
-  // ลูปประมวลผลกล้องแบบเรียลไทม์
+  // ลูปประมวลผลกล้องแบบเรียลไทม์ (โหมดล็อกเป้า 4 มุม Target ROIs Mode)
   function runCameraScanLoop() {
     if (!isScanning || !videoElem || videoElem.readyState < 2) {
       if (isScanning) {
@@ -850,24 +963,23 @@ document.addEventListener('DOMContentLoaded', () => {
       generatedLayoutMeta = layoutMeta;
     }
 
+    // 1. คำนวณพิกัดเป้าหมาย 4 มุมตามสัดส่วนกระดาษคำตอบวิชานั้นๆ
+    const targetCorners = computeTargetCorners(overlayCanvas.width, overlayCanvas.height, generatedLayoutMeta);
+
     const now = Date.now();
 
-    // 0. ถ้าผลคะแนนและภาพนิ่งกำลังถูกตรึงอยู่ (isLatched === true)
+    // 2. ถ้าผลคะแนนและภาพนิ่งกำลังถูกตรึงอยู่ (isLatched === true)
     if (isLatched) {
       // ตรวจจับว่ายกกระดาษแผ่นเก่าออกไปแล้วหรือยัง
-      const detection = omrEngine.detectCorners(videoElem);
-      const corners = detection ? detection.corners : null;
+      const checkDetection = omrEngine.detectCorners(videoElem, targetCorners);
 
-      if (!corners) {
+      if (!checkDetection || checkDetection.matchedCount === 0) {
         emptyFramesCount++;
         // ถ้าไม่พบกระดาษติดต่อกันเกิน 16 เฟรม (~0.5 วินาที) แปลว่าครูยกกระดาษแผ่นเดิมออกแล้ว
         if (emptyFramesCount > 16) {
           isLatched = false;
           emptyFramesCount = 0;
           stableFrameCount = 0;
-          smoothedCorners = null;
-
-          if (scanGuideBox) scanGuideBox.style.opacity = '1.0';
 
           if (freezeStatusBadge) {
             freezeStatusBadge.className = 'px-2.5 py-1 rounded-full text-xs font-bold bg-amber-100 text-amber-800';
@@ -878,69 +990,34 @@ document.addEventListener('DOMContentLoaded', () => {
       } else {
         emptyFramesCount = 0;
         // ยังเป็นกระดาษแผ่นเดิม ให้วาดกรอบเขียวนิ่งๆ ไว้ ไม่คำนวณคะแนนซ้ำ ไม่กระพริบ
-        if (smoothedCorners) {
-          drawDetectedCorners(ctx, smoothedCorners);
-        } else {
-          drawDetectedCorners(ctx, corners);
-        }
+        drawTargetReticle(ctx, targetCorners, checkDetection.matchedCorners, true);
       }
 
       scanAnimationId = requestAnimationFrame(runCameraScanLoop);
       return;
     }
 
-    // 1. ตรวจจับจุดมาร์คและรูปทรงกระดาษแบบเรียลไทม์
-    const detection = omrEngine.detectCorners(videoElem);
-    const rawCorners = detection ? detection.corners : null;
-    const candidates = detection ? detection.candidates : [];
+    // 3. ตรวจจับจุดมาร์คในกรอบเป้าหมาย 4 มุม (Target ROIs Alignment Mode)
+    const detection = omrEngine.detectCorners(videoElem, targetCorners);
 
-    let activeCorners = null;
-
-    if (rawCorners && omrEngine.isValidQuadGeometry(rawCorners, overlayCanvas.width, overlayCanvas.height)) {
-      cornerLossFrames = 0;
-
-      // กรองการสั่นไหวของมือด้วย Deadband + Exponential Moving Average (EMA)
-      // ช่วยให้เส้นกรอบสีเขียวนิ่งสนิท ไม่สั่น ไม่กระตุก และไม่หมุนวน
-      if (!smoothedCorners) {
-        smoothedCorners = rawCorners.map(p => ({ x: p.x, y: p.y }));
-      } else {
-        for (let i = 0; i < 4; i++) {
-          const dx = rawCorners[i].x - smoothedCorners[i].x;
-          const dy = rawCorners[i].y - smoothedCorners[i].y;
-          const dist = Math.hypot(dx, dy);
-
-          // Deadband Filter: ถือกล้องนิ่งหรือสั่นน้อยกว่า 4px ให้ตรึงนิ่ง 100% ไม่สั่นไหว
-          if (dist >= 4) {
-            const alpha = dist > 60 ? 0.70 : 0.35;
-            smoothedCorners[i].x += dx * alpha;
-            smoothedCorners[i].y += dy * alpha;
-          }
-        }
-      }
-
-      activeCorners = smoothedCorners;
-
-      // หรี่ไกด์กรอบเล็งด้านหลัง เพื่อให้เห็นเส้นสีเขียวที่ลากเชื่อมจุดมาร์คจริงชัดเจน
-      if (scanGuideBox) scanGuideBox.style.opacity = '0.15';
-
-      // วาดกรอบสีเขียวลากเชื่อมจุดมาร์คทั้ง 4 แบบนิ่งสนิท
-      drawDetectedCorners(ctx, activeCorners);
+    if (detection && detection.allMatched && detection.corners) {
+      // ตรงครบทั้ง 4 มุมแล้ว! กรอบเปลี่ยนเป็นสีเขียวมรกต 🟢
+      drawTargetReticle(ctx, targetCorners, detection.matchedCorners, true);
       stableFrameCount++;
 
       if (scanStatusIndicator) {
         scanStatusIndicator.className = 'w-2.5 h-2.5 rounded-full bg-emerald-500 animate-pulse';
       }
 
-      if (stableFrameCount < 3) {
-        scanStatusText.innerHTML = '<span class="text-amber-300 font-medium">🟡 ล็อกจุดมาร์คได้แล้ว... ถือกล้องให้นิ่ง</span>';
+      if (stableFrameCount < 2) {
+        scanStatusText.innerHTML = '<span class="text-emerald-400 font-bold animate-pulse">🟢 ล็อกเป้าตรงครบ 4 มุมแล้ว! ถือกล้องให้นิ่ง...</span>';
       } else {
-        // เมื่อตรวจจับได้นิ่งต่อเนื่องอย่างน้อย 3 เฟรม และพ้นระยะหน่วงเวลาตรวจซ้ำ (1.5 วินาที)
+        // เมื่อนิ่งต่อเนื่องอย่างน้อย 2 เฟรม และพ้นระยะหน่วงเวลาตรวจซ้ำ (1.5 วินาที)
         if (now - lastGradedTime > 1500) {
-          scanStatusText.innerHTML = '<span class="text-emerald-400 font-bold animate-pulse">🟢 ล็อกจุดมาร์คครบ 4 มุมแล้ว กำลังตรวจ...</span>';
-          const result = omrEngine.processFrame(videoElem, activeExam, generatedLayoutMeta);
+          scanStatusText.innerHTML = '<span class="text-emerald-400 font-bold animate-pulse">🟢 ตรงเป๊ะ! กำลังประมวลผลคำตอบ...</span>';
+          const result = omrEngine.processFrame(videoElem, activeExam, generatedLayoutMeta, targetCorners);
 
           if (result.success) {
-            flashSuccessOverlay(ctx, activeCorners);
             handleGradeSuccess(result, videoElem);
             stableFrameCount = 0;
           } else {
@@ -951,31 +1028,22 @@ document.addEventListener('DOMContentLoaded', () => {
         }
       }
     } else {
-      cornerLossFrames++;
-      // คงกรอบเขียวเดิมไว้สั้นๆ 5 เฟรม (~80ms) ป้องกันการกระพริบหายวูบวาบจาก Auto Focus
-      if (cornerLossFrames <= 5 && smoothedCorners) {
-        drawDetectedCorners(ctx, smoothedCorners);
+      stableFrameCount = 0;
+      // วาดกรอบเป้าหมายพร้อมแสดงฟีดแบ็กสี (เหลืองสำหรับมุมที่ตรงแล้ว, ขาวสำหรับมุมที่ยังไม่ตรง)
+      drawTargetReticle(ctx, targetCorners, detection ? detection.matchedCorners : null, false);
+
+      const matchedCount = detection ? detection.matchedCount : 0;
+      if (matchedCount > 0) {
+        if (scanStatusIndicator) {
+          scanStatusIndicator.className = 'w-2.5 h-2.5 rounded-full bg-amber-500 animate-pulse';
+        }
+        scanStatusText.innerHTML = `<span class="text-amber-300 font-medium">🎯 เล็งตรงแล้ว ${matchedCount}/4 มุม (ขยับอีกนิดให้เข้ากรอบครบ 4 มุม)</span>`;
       } else {
-        smoothedCorners = null;
-        if (scanGuideBox) scanGuideBox.style.opacity = '1.0';
-
-        if (candidates && candidates.length > 0) {
-          stableFrameCount = 0;
-          drawPartialCorners(ctx, candidates);
-
-          if (scanStatusIndicator) {
-            scanStatusIndicator.className = 'w-2.5 h-2.5 rounded-full bg-amber-500 animate-pulse';
-          }
-          scanStatusText.innerHTML = `<span class="text-amber-300 font-medium">🟡 พบจุดมาร์ค ${candidates.length}/4 จุด (กรุณาถอยกล้องออกเล็กน้อยให้เห็นครบ 4 มุม)</span>`;
-        } else {
-          stableFrameCount = 0;
-
-          if (scanStatusIndicator) {
-            scanStatusIndicator.className = 'w-2.5 h-2.5 rounded-full bg-slate-500';
-          }
-          if (now - lastGradedTime > 2500) {
-            scanStatusText.innerHTML = '<span class="text-slate-300">📷 ส่องกล้องให้เห็นจุดมาร์คสี่เหลี่ยมดำ 4 มุมของกระดาษคำตอบ</span>';
-          }
+        if (scanStatusIndicator) {
+          scanStatusIndicator.className = 'w-2.5 h-2.5 rounded-full bg-slate-500';
+        }
+        if (now - lastGradedTime > 2500) {
+          scanStatusText.innerHTML = '<span class="text-slate-300">🎯 ส่องให้จุดมาร์คสี่เหลี่ยมดำ 4 มุมของกระดาษ เข้าพอดีในกรอบ 4 มุม</span>';
         }
       }
     }
